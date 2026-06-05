@@ -78,6 +78,8 @@ pub async fn search_project(
     include_content: Option<bool>,
     query_embedding: Option<Vec<f32>>,
     embedding_config: Option<SearchEmbeddingConfig>,
+    // ENTERPRISE: optional bounded-context filter; None preserves upstream behavior
+    bc: Option<String>,
 ) -> Result<ProjectSearchResponse, String> {
     run_guarded_async("search_project", async move {
         let query_embedding =
@@ -88,6 +90,7 @@ pub async fn search_project(
             top_k.unwrap_or(DEFAULT_RESULTS),
             include_content.unwrap_or(false),
             query_embedding,
+            bc, // ENTERPRISE: pass bc filter through
         )
         .await
     })
@@ -133,10 +136,16 @@ pub async fn search_project_inner(
     top_k: usize,
     include_content: bool,
     query_embedding: Option<Vec<f32>>,
+    // ENTERPRISE: optional bounded-context filter; None preserves upstream behavior
+    bc_filter: Option<String>,
 ) -> Result<ProjectSearchResponse, String> {
     if query.trim().is_empty() {
         return Err("query is required".to_string());
     }
+    // ENTERPRISE: normalize bc filter once (case-insensitive, trimmed)
+    let bc_filter = bc_filter
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
     let limit = top_k.clamp(1, MAX_RESULTS);
     let tokens = tokenize_query(&query);
     let effective_tokens = if tokens.is_empty() {
@@ -168,6 +177,15 @@ pub async fn search_project_inner(
                 Ok(content) => content,
                 Err(_) => continue,
             };
+            // ENTERPRISE: skip pages whose frontmatter bc does not match the filter.
+            // Skipping before page_paths_by_stem insertion also keeps vector-only
+            // results out of scope, so the filter applies to keyword + vector paths.
+            if let Some(ref wanted_bc) = bc_filter {
+                let page_bc = frontmatter_field(&content, "bc").map(|s| s.to_lowercase());
+                if page_bc.as_deref() != Some(wanted_bc.as_str()) {
+                    continue;
+                }
+            }
             if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
                 let previous = page_paths_by_stem.insert(
                     stem.to_string(),
@@ -606,6 +624,33 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
         return 0;
     }
     haystack.match_indices(needle).count()
+}
+
+// ENTERPRISE: read a scalar YAML frontmatter field (e.g. `bc:`) from a page.
+// Returns the trimmed, unquoted value, or None if there is no frontmatter or
+// the key is absent. Only the leading `---`-delimited block is inspected.
+pub fn frontmatter_field(content: &str, key: &str) -> Option<String> {
+    if !content.starts_with("---") {
+        return None;
+    }
+    let prefix = format!("{key}:");
+    for line in content.lines().skip(1) {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix(&prefix) {
+            let value = rest
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .trim();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 pub fn extract_title(content: &str, file_name: &str) -> String {
@@ -1122,6 +1167,7 @@ mod tests {
             20,
             false,
             None,
+            None, // ENTERPRISE: no bc filter in this test
         )
         .await
         .unwrap();
@@ -1148,6 +1194,7 @@ mod tests {
             20,
             false,
             None,
+            None, // ENTERPRISE: no bc filter in this test
         )
         .await
         .unwrap();
@@ -1177,11 +1224,68 @@ mod tests {
             20,
             false,
             None,
+            None, // ENTERPRISE: no bc filter in this test
         )
         .await
         .unwrap();
 
         assert_eq!(out.results[0].title, "Phrase");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // ENTERPRISE: bounded-context filter unit tests
+    #[test]
+    fn frontmatter_field_reads_scalar_bc() {
+        let page = "---\ntype: decision\nbc: payment\ntitle: X\n---\n\n# X\nbody";
+        assert_eq!(frontmatter_field(page, "bc").as_deref(), Some("payment"));
+        let quoted = "---\nbc: \"payment\"\n---\nbody";
+        assert_eq!(frontmatter_field(quoted, "bc").as_deref(), Some("payment"));
+        let no_fm = "# X\nbc: payment";
+        assert_eq!(frontmatter_field(no_fm, "bc"), None);
+        let absent = "---\ntype: concept\n---\nbody";
+        assert_eq!(frontmatter_field(absent, "bc"), None);
+    }
+
+    #[tokio::test]
+    async fn bc_filter_only_returns_matching_pages() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/decisions/pay.md",
+            "---\ntype: decision\nbc: payment\ntitle: Retry\n---\n\n# Retry\n\n支付失败重试机制说明。",
+        );
+        write_page(
+            &root,
+            "wiki/decisions/ship.md",
+            "---\ntype: decision\nbc: shipping\ntitle: Retry\n---\n\n# Retry\n\n支付失败重试机制说明。",
+        );
+
+        // Without filter both pages match the query.
+        let all = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "支付失败重试".into(),
+            20,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.results.len(), 2);
+
+        // With bc=payment only the payment page survives.
+        let filtered = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "支付失败重试".into(),
+            20,
+            false,
+            None,
+            Some("Payment".into()), // case-insensitive
+        )
+        .await
+        .unwrap();
+        assert_eq!(filtered.results.len(), 1);
+        assert!(filtered.results[0].path.ends_with("pay.md"));
         let _ = fs::remove_dir_all(root);
     }
 }

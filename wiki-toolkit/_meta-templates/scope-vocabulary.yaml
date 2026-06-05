@@ -1,0 +1,33 @@
+# Scope Vocabulary — TEMPLATE
+#
+# 复制到消费者 vault 的 `wiki/_meta/scope-vocabulary.yaml`。
+# page_types 与 sdlc_phases 一般保持本模板默认值（与 schema.md 对齐）；
+# keyword_to_bc 按本库主题自行填写。
+version: 1
+updated: YYYY-MM-DD
+
+# frontmatter `type:` 合法取值（默认随企业级 schema，一般无需改）
+page_types:
+  - entity
+  - concept
+  - source
+  - query
+  - comparison
+  - synthesis
+  - solution
+  - playbook
+  - decision
+  - learning
+  - bc-readme
+  - overview
+
+# frontmatter `sdlc_phases:` 合法取值
+sdlc_phases:
+  - design
+  - dev
+  - test
+  - ops
+
+# 关键词 → bounded context 归一映射（小写）。按本库主题填写；id 必须存在于 bc-registry.yaml。
+keyword_to_bc:
+  example-keyword: example-domain

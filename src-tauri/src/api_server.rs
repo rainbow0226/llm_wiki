@@ -949,6 +949,8 @@ struct SearchRequest {
     top_k: Option<usize>,
     include_content: Option<bool>,
     query_embedding: Option<Vec<f32>>,
+    // ENTERPRISE: optional bounded-context filter (e.g. {"bc": "payment"})
+    bc: Option<String>,
 }
 
 fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
@@ -965,6 +967,7 @@ fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
     }
     let top_k = req.top_k.unwrap_or(10).clamp(1, MAX_SEARCH_RESULTS);
     let query = req.query;
+    let bc_filter = req.bc.clone(); // ENTERPRISE: bounded-context filter
     let query_embedding =
         match tauri::async_runtime::block_on(commands::search::resolve_query_embedding(
             &query,
@@ -980,6 +983,7 @@ fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
         top_k,
         req.include_content.unwrap_or(false),
         query_embedding,
+        bc_filter, // ENTERPRISE: bounded-context filter
     )) {
         Ok(search) => ok(json!({
             "ok": true,

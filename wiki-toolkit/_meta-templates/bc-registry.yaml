@@ -1,0 +1,35 @@
+# Bounded Context Registry — TEMPLATE
+#
+# 复制到消费者 vault 的 `wiki/_meta/bc-registry.yaml` 后，按本库实际知识域替换 contexts。
+# 这是中心化工具链的「模板」副本（wiki-toolkit/），消费者 vault 持有自己的实例，不反向同步。
+#
+# 字段契约（每个 context）：
+#   id            必填，唯一。页面 frontmatter `bc:` 的取值必须是某个 id。kebab-case / 小写。
+#   title         必填，人类可读名。
+#   description   必填，一句话界定该域范围。
+#   aliases       可选，别名/关键词数组，供归一与提示。
+#   readme        可选，指向该域 type:bc-readme 总览页的相对路径。
+#   sdlc_focus    可选，该域主要服务的 SDLC 阶段（design/dev/test/ops），可为 []。
+#   related       可选，相关 context id 数组。
+#   status        必填，active | deprecated（废弃域保留以便历史页解析）。
+version: 1
+updated: YYYY-MM-DD
+
+contexts:
+  - id: example-domain
+    title: 示例知识域
+    description: 一句话说明该域的边界与覆盖范围。
+    aliases: [alias-1, 别名]
+    readme: wiki/_meta/example-domain.md
+    sdlc_focus: [design, dev]
+    related: []
+    status: active
+
+  - id: general
+    title: 通用 / 未归类
+    description: 跨域或暂未归类的通用知识；优先归入更具体的域。
+    aliases: [misc, uncategorized]
+    readme: wiki/_meta/general.md
+    sdlc_focus: []
+    related: []
+    status: active

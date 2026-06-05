@@ -132,13 +132,14 @@ export class LlmWikiApiClient {
     }
   }
 
-  async search(projectId = "current", query: string, options: { topK?: number; includeContent?: boolean } = {}): Promise<ApiSearchResponse> {
+  async search(projectId = "current", query: string, options: { topK?: number; includeContent?: boolean; bc?: string } = {}): Promise<ApiSearchResponse> {
     const json = await this.request(`/projects/${encodeURIComponent(projectId)}/search`, {
       method: "POST",
       body: {
         query,
         topK: options.topK,
         includeContent: options.includeContent,
+        bc: options.bc, // ENTERPRISE: bounded-context filter (omitted when undefined → JSON.stringify drops it)
       },
     })
     return {
