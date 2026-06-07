@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use walkdir::WalkDir;
 
@@ -259,6 +259,14 @@ fn handle_request(
         (&Method::Get, ["projects", project_id, "graph"]) => handle_graph(app, project_id, query),
         (&Method::Post, ["projects", project_id, "sources", "rescan"]) => {
             handle_rescan(app, project_id)
+        }
+        // ENTERPRISE (P2, write-channel B): accept a finished wiki page over
+        // HTTP so Claude Code skills (kb-add / kb-distill) can write knowledge
+        // back through one canonical entry point. The endpoint only lands the
+        // file on disk; chunk + contextual-prefix + embed run in the WebView's
+        // canonical `embedPage` pipeline, triggered by the emitted event below.
+        (&Method::Post, ["projects", project_id, "sources"]) => {
+            handle_create_source(app, project_id, body)
         }
         (&Method::Post, ["projects", project_id, "chat"]) => {
             let _ = project_id;
@@ -1187,6 +1195,129 @@ fn handle_rescan(app: &AppHandle, project_id: &str) -> ApiResponse {
     }
 }
 
+// ENTERPRISE (P2): the WebView listens for this event and runs the canonical
+// `embedPage` pipeline (chunk → contextual-prefix → embed → upsert) on the
+// page we just wrote. Keep the name in sync with the listener in
+// `src/lib/project-file-sync.ts`.
+const EVENT_EMBED_PAGE: &str = "wiki://embed-page";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateSourceRequest {
+    /// Project-relative target path, e.g. `wiki/learnings/payment-retry.md`.
+    path: String,
+    /// Full markdown body (frontmatter included) of the finished page.
+    content: String,
+    /// Overwrite an existing file. Defaults to false (409 on collision) so a
+    /// skill can't silently clobber a hand-written page.
+    overwrite: Option<bool>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbedPageEvent {
+    project_id: String,
+    page_id: String,
+    path: String,
+}
+
+/// Whether `rel` is a path this endpoint is allowed to WRITE. Stricter than
+/// the read-side `is_public_project_rel`: writes are confined to markdown
+/// files under `wiki/` or `raw/sources/` (no `purpose.md` / `schema.md`
+/// clobbering, no dotfiles, no non-markdown drops).
+fn is_writable_source_rel(rel: &str) -> bool {
+    let rel = normalize_path(rel);
+    let rel = rel.trim_start_matches('/');
+    if rel.is_empty() {
+        return false;
+    }
+    if rel.split('/').any(|part| part.is_empty() || part.starts_with('.')) {
+        return false;
+    }
+    let lower = rel.to_lowercase();
+    if !lower.ends_with(".md") {
+        return false;
+    }
+    lower.starts_with("wiki/") || lower.starts_with("raw/sources/")
+}
+
+fn handle_create_source(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(e) => return err(404, e),
+    };
+    let req: CreateSourceRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(e) => return err(400, format!("Invalid JSON: {e}")),
+    };
+    if req.content.trim().is_empty() {
+        return err(400, "content is required");
+    }
+    if req.content.len() as u64 > MAX_FILE_CONTENT_BYTES {
+        return err(413, "content exceeds the maximum writable page size");
+    }
+    if !is_writable_source_rel(&req.path) {
+        return err(
+            403,
+            "path must be a .md file under wiki/ or raw/sources/ (no dotfiles or traversal)",
+        );
+    }
+    let target = match safe_join(&project.path, &req.path) {
+        Ok(path) => path,
+        Err(e) => return err(400, e),
+    };
+    let overwrite = req.overwrite.unwrap_or(false);
+    let existed = target.exists();
+    if existed && !overwrite {
+        return err(
+            409,
+            "A file already exists at that path; pass overwrite:true to replace it",
+        );
+    }
+    if let Some(parent) = target.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            return err(500, format!("Failed to create parent directory: {e}"));
+        }
+    }
+    if let Err(e) = fs::write(&target, req.content.as_bytes()) {
+        return err(500, format!("Failed to write page: {e}"));
+    }
+
+    let normalized_rel = normalize_path(&req.path);
+    let normalized_rel = normalized_rel.trim_start_matches('/').to_string();
+    let page_id = Path::new(&normalized_rel)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Vector indexing only fires for wiki pages: raw/sources drops go through
+    // the existing watcher + autoIngest path, not embedPage.
+    let embed_queued = normalized_rel.to_lowercase().starts_with("wiki/");
+    if embed_queued {
+        let _ = app.emit(
+            EVENT_EMBED_PAGE,
+            EmbedPageEvent {
+                project_id: project.id.clone(),
+                page_id: page_id.clone(),
+                path: normalized_rel.clone(),
+            },
+        );
+    }
+
+    ok(json!({
+        "ok": true,
+        "projectId": project.id,
+        "path": normalized_rel,
+        "pageId": page_id,
+        "created": !existed,
+        // True ⇒ the page is keyword-searchable now and the WebView was asked
+        // to embed it; vector results appear once embedding completes (needs
+        // the desktop app open). False ⇒ raw/sources drop, handled by ingest.
+        "embedQueued": embed_queued,
+    }))
+}
+
 fn load_source_watch_config(
     app: &AppHandle,
     project_id: &str,
@@ -1274,6 +1405,23 @@ mod tests {
         assert!(is_public_project_rel("Raw/Sources/source.md"));
         assert!(!is_public_project_rel(".llm-wiki/file-change-queue.json"));
         assert!(!is_public_project_rel("wiki/.draft.md"));
+    }
+
+    #[test]
+    fn writable_source_rel_allows_only_markdown_under_wiki_or_sources() {
+        // ENTERPRISE (P2): write-channel allowlist.
+        assert!(is_writable_source_rel("wiki/learnings/payment-retry.md"));
+        assert!(is_writable_source_rel("Wiki/Learnings/Note.MD"));
+        assert!(is_writable_source_rel("raw/sources/dropped.md"));
+        // Wrong root, non-markdown, dotfiles, traversal, and the protected
+        // top-level docs are all rejected.
+        assert!(!is_writable_source_rel("schema.md"));
+        assert!(!is_writable_source_rel("purpose.md"));
+        assert!(!is_writable_source_rel("wiki/notes.txt"));
+        assert!(!is_writable_source_rel("wiki/.draft.md"));
+        assert!(!is_writable_source_rel("wiki/../escape.md"));
+        assert!(!is_writable_source_rel(".llm-wiki/state.md"));
+        assert!(!is_writable_source_rel(""));
     }
 
     #[test]

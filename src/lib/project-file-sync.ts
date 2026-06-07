@@ -22,6 +22,11 @@ import { isPathAllowedBySourceWatch, normalizeSourceWatchConfig } from "@/lib/so
 
 let unlistenQueue: UnlistenFn | null = null
 let unlistenChanged: UnlistenFn | null = null
+// ENTERPRISE (P2): listener for pages written via the HTTP `POST /sources`
+// endpoint (write-channel B). The backend lands the file then emits this so
+// the canonical `embedPage` pipeline (chunk → contextual-prefix → embed)
+// indexes it — wiki writes are NOT auto-embedded by the file watcher.
+let unlistenEmbedPage: UnlistenFn | null = null
 let startSeq = 0
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
 let pendingRefreshPaths = new Set<string>()
@@ -50,6 +55,12 @@ export async function startProjectFileSync(
     scheduleRefreshAfterFileChanges(event.payload.tasks)
   })
 
+  unlistenEmbedPage = await listen<EmbedPageEvent>("wiki://embed-page", (event) => {
+    const current = useWikiStore.getState().project
+    if (!current || event.payload.projectId !== current.id) return
+    void embedPageFromEvent(current, event.payload)
+  })
+
   try {
     const result = await startProjectFileWatcher(project.id, normalizePath(project.path), activeSourceWatchConfig)
     if (seq !== startSeq || project.id !== useWikiStore.getState().project?.id) return
@@ -72,8 +83,10 @@ export async function startProjectFileSync(
   } catch (err) {
     unlistenQueue?.()
     unlistenChanged?.()
+    unlistenEmbedPage?.()
     unlistenQueue = null
     unlistenChanged = null
+    unlistenEmbedPage = null
     useFileSyncStore.getState().setLastError(String(err))
     throw err
   } finally {
@@ -87,8 +100,10 @@ export async function stopProjectFileSync(): Promise<void> {
   startSeq++
   unlistenQueue?.()
   unlistenChanged?.()
+  unlistenEmbedPage?.()
   unlistenQueue = null
   unlistenChanged = null
+  unlistenEmbedPage = null
   if (refreshTimer) {
     clearTimeout(refreshTimer)
     refreshTimer = null
@@ -163,6 +178,43 @@ function changeTaskKey(task: FileChangeTask): string {
   return task.id
     ? `${task.id}:${version}`
     : `${task.projectId}:${task.path}:${task.kind}:${version}`
+}
+
+// ENTERPRISE (P2): payload mirrors `EmbedPageEvent` in `api_server.rs`.
+interface EmbedPageEvent {
+  projectId: string
+  pageId: string
+  path: string
+}
+
+// Aggregate views, not retrieval targets — same skip-list the autoIngest
+// embed loop uses in ingest.ts.
+const NON_EMBEDDABLE_PAGE_IDS = new Set(["index", "log", "overview"])
+
+/**
+ * Embed a page that was just written through `POST /sources`. Reuses the
+ * canonical `embedPage` pipeline so contextual-prefix and chunking stay in
+ * one place; a disabled embedding config or a structural page is a no-op
+ * (the page is still keyword-searchable from disk regardless).
+ */
+async function embedPageFromEvent(project: WikiProject, payload: EmbedPageEvent): Promise<void> {
+  const pageId = payload.pageId.trim()
+  if (!pageId || NON_EMBEDDABLE_PAGE_IDS.has(pageId)) return
+
+  const cfg = useWikiStore.getState().embeddingConfig
+  if (!cfg.enabled || !cfg.model) return
+
+  const pp = normalizePath(project.path)
+  try {
+    const content = await readFile(`${pp}/${payload.path}`)
+    const titleMatch = content.match(/^---\n[\s\S]*?^title:\s*["']?(.+?)["']?\s*$/m)
+    const title = titleMatch ? titleMatch[1].trim() : pageId
+    const { embedPage } = await import("@/lib/embedding")
+    await embedPage(pp, pageId, title, content, cfg)
+    useWikiStore.getState().bumpDataVersion()
+  } catch (err) {
+    console.error(`[file-sync] embed-on-write failed for "${payload.path}":`, err)
+  }
 }
 
 async function processFileChangeBatch(
