@@ -139,7 +139,7 @@ export class LlmWikiApiClient {
         query,
         topK: options.topK,
         includeContent: options.includeContent,
-        bc: options.bc, // ENTERPRISE: bounded-context filter (omitted when undefined → JSON.stringify drops it)
+        bc: options.bc, // DEVWIKI: bounded-context filter (omitted when undefined → JSON.stringify drops it)
       },
     })
     return {

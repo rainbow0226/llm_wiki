@@ -22,7 +22,7 @@ import { isPathAllowedBySourceWatch, normalizeSourceWatchConfig } from "@/lib/so
 
 let unlistenQueue: UnlistenFn | null = null
 let unlistenChanged: UnlistenFn | null = null
-// ENTERPRISE (P2): listener for pages written via the HTTP `POST /sources`
+// DEVWIKI (P2): listener for pages written via the HTTP `POST /sources`
 // endpoint (write-channel B). The backend lands the file then emits this so
 // the canonical `embedPage` pipeline (chunk → contextual-prefix → embed)
 // indexes it — wiki writes are NOT auto-embedded by the file watcher.
@@ -180,7 +180,7 @@ function changeTaskKey(task: FileChangeTask): string {
     : `${task.projectId}:${task.path}:${task.kind}:${version}`
 }
 
-// ENTERPRISE (P2): payload mirrors `EmbedPageEvent` in `api_server.rs`.
+// DEVWIKI (P2): payload mirrors `EmbedPageEvent` in `api_server.rs`.
 interface EmbedPageEvent {
   projectId: string
   pageId: string

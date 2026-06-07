@@ -77,7 +77,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           query: { type: "string", description: "Search query." },
           top_k: { type: "number", description: "Maximum results. The local API clamps to its configured maximum." },
           include_content: { type: "boolean", description: "Include full page content in results when supported by the API." },
-          // ENTERPRISE: bounded-context filter
+          // DEVWIKI: bounded-context filter
           bc: { type: "string", description: "Optional bounded-context filter (frontmatter `bc:`); only pages in this knowledge domain are returned." },
         },
         required: ["query"],
@@ -148,7 +148,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const search = await client.search(projectId(args), query, {
           topK: numberArg(args.top_k),
           includeContent: boolArg(args.include_content, false),
-          bc: optionalStringArg(args.bc), // ENTERPRISE: bounded-context filter
+          bc: optionalStringArg(args.bc), // DEVWIKI: bounded-context filter
         })
         return textResult(formatSearchResults(query, search))
       }

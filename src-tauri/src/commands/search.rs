@@ -78,7 +78,7 @@ pub async fn search_project(
     include_content: Option<bool>,
     query_embedding: Option<Vec<f32>>,
     embedding_config: Option<SearchEmbeddingConfig>,
-    // ENTERPRISE: optional bounded-context filter; None preserves upstream behavior
+    // DEVWIKI: optional bounded-context filter; None preserves upstream behavior
     bc: Option<String>,
 ) -> Result<ProjectSearchResponse, String> {
     run_guarded_async("search_project", async move {
@@ -90,7 +90,7 @@ pub async fn search_project(
             top_k.unwrap_or(DEFAULT_RESULTS),
             include_content.unwrap_or(false),
             query_embedding,
-            bc, // ENTERPRISE: pass bc filter through
+            bc, // DEVWIKI: pass bc filter through
         )
         .await
     })
@@ -136,13 +136,13 @@ pub async fn search_project_inner(
     top_k: usize,
     include_content: bool,
     query_embedding: Option<Vec<f32>>,
-    // ENTERPRISE: optional bounded-context filter; None preserves upstream behavior
+    // DEVWIKI: optional bounded-context filter; None preserves upstream behavior
     bc_filter: Option<String>,
 ) -> Result<ProjectSearchResponse, String> {
     if query.trim().is_empty() {
         return Err("query is required".to_string());
     }
-    // ENTERPRISE: normalize bc filter once (case-insensitive, trimmed)
+    // DEVWIKI: normalize bc filter once (case-insensitive, trimmed)
     let bc_filter = bc_filter
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
@@ -177,7 +177,7 @@ pub async fn search_project_inner(
                 Ok(content) => content,
                 Err(_) => continue,
             };
-            // ENTERPRISE: skip pages whose frontmatter bc does not match the filter.
+            // DEVWIKI: skip pages whose frontmatter bc does not match the filter.
             // Skipping before page_paths_by_stem insertion also keeps vector-only
             // results out of scope, so the filter applies to keyword + vector paths.
             if let Some(ref wanted_bc) = bc_filter {
@@ -626,7 +626,7 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
 }
 
-// ENTERPRISE: read a scalar YAML frontmatter field (e.g. `bc:`) from a page.
+// DEVWIKI: read a scalar YAML frontmatter field (e.g. `bc:`) from a page.
 // Returns the trimmed, unquoted value, or None if there is no frontmatter or
 // the key is absent. Only the leading `---`-delimited block is inspected.
 pub fn frontmatter_field(content: &str, key: &str) -> Option<String> {
@@ -1167,7 +1167,7 @@ mod tests {
             20,
             false,
             None,
-            None, // ENTERPRISE: no bc filter in this test
+            None, // DEVWIKI: no bc filter in this test
         )
         .await
         .unwrap();
@@ -1194,7 +1194,7 @@ mod tests {
             20,
             false,
             None,
-            None, // ENTERPRISE: no bc filter in this test
+            None, // DEVWIKI: no bc filter in this test
         )
         .await
         .unwrap();
@@ -1224,7 +1224,7 @@ mod tests {
             20,
             false,
             None,
-            None, // ENTERPRISE: no bc filter in this test
+            None, // DEVWIKI: no bc filter in this test
         )
         .await
         .unwrap();
@@ -1233,7 +1233,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    // ENTERPRISE: bounded-context filter unit tests
+    // DEVWIKI: bounded-context filter unit tests
     #[test]
     fn frontmatter_field_reads_scalar_bc() {
         let page = "---\ntype: decision\nbc: payment\ntitle: X\n---\n\n# X\nbody";

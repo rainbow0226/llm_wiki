@@ -260,7 +260,7 @@ fn handle_request(
         (&Method::Post, ["projects", project_id, "sources", "rescan"]) => {
             handle_rescan(app, project_id)
         }
-        // ENTERPRISE (P2, write-channel B): accept a finished wiki page over
+        // DEVWIKI (P2, write-channel B): accept a finished wiki page over
         // HTTP so Claude Code skills (kb-add / kb-distill) can write knowledge
         // back through one canonical entry point. The endpoint only lands the
         // file on disk; chunk + contextual-prefix + embed run in the WebView's
@@ -957,7 +957,7 @@ struct SearchRequest {
     top_k: Option<usize>,
     include_content: Option<bool>,
     query_embedding: Option<Vec<f32>>,
-    // ENTERPRISE: optional bounded-context filter (e.g. {"bc": "payment"})
+    // DEVWIKI: optional bounded-context filter (e.g. {"bc": "payment"})
     bc: Option<String>,
 }
 
@@ -975,7 +975,7 @@ fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
     }
     let top_k = req.top_k.unwrap_or(10).clamp(1, MAX_SEARCH_RESULTS);
     let query = req.query;
-    let bc_filter = req.bc.clone(); // ENTERPRISE: bounded-context filter
+    let bc_filter = req.bc.clone(); // DEVWIKI: bounded-context filter
     let query_embedding =
         match tauri::async_runtime::block_on(commands::search::resolve_query_embedding(
             &query,
@@ -991,7 +991,7 @@ fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
         top_k,
         req.include_content.unwrap_or(false),
         query_embedding,
-        bc_filter, // ENTERPRISE: bounded-context filter
+        bc_filter, // DEVWIKI: bounded-context filter
     )) {
         Ok(search) => ok(json!({
             "ok": true,
@@ -1195,7 +1195,7 @@ fn handle_rescan(app: &AppHandle, project_id: &str) -> ApiResponse {
     }
 }
 
-// ENTERPRISE (P2): the WebView listens for this event and runs the canonical
+// DEVWIKI (P2): the WebView listens for this event and runs the canonical
 // `embedPage` pipeline (chunk → contextual-prefix → embed → upsert) on the
 // page we just wrote. Keep the name in sync with the listener in
 // `src/lib/project-file-sync.ts`.
@@ -1409,7 +1409,7 @@ mod tests {
 
     #[test]
     fn writable_source_rel_allows_only_markdown_under_wiki_or_sources() {
-        // ENTERPRISE (P2): write-channel allowlist.
+        // DEVWIKI (P2): write-channel allowlist.
         assert!(is_writable_source_rel("wiki/learnings/payment-retry.md"));
         assert!(is_writable_source_rel("Wiki/Learnings/Note.MD"));
         assert!(is_writable_source_rel("raw/sources/dropped.md"));
