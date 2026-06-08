@@ -24,4 +24,4 @@
 - `bc`：取值必须在消费者 vault 的 `wiki/_meta/bc-registry.yaml` 在册。
 - `sdlc_phases`：取值限 `design/dev/test/ops`，纯概念页可为 `[]`。
 
-`/kb-lint` 按上述规则校验。字段权威定义见消费者 vault 的 `schema.md`。
+`/wiki-lint` 按上述规则校验。字段权威定义见消费者 vault 的 `schema.md`。

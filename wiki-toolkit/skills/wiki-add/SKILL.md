@@ -132,7 +132,7 @@ json.dump({"path":sys.argv[1],"content":open(sys.argv[2]).read(),"overwrite":Fal
 - `bc` MUST be a registered id — registering a new one is a `bc-registry.yaml` edit + a human
   decision, never an ad-hoc value smuggled into a page.
 - `summary` is mandatory and semantic — never blank, never `TODO`, never auto-padded filler.
-- Respect type↔directory routing; a mis-homed page breaks `/kb-lint` check #8 and discovery.
+- Respect type↔directory routing; a mis-homed page breaks `/wiki-lint` check #8 and discovery.
 - Post through `POST /sources` — do NOT hand-write into `wiki/` and skip the endpoint (you'd
   lose the embed trigger).
-- After writing, a quick `/kb-lint` on the new page is a cheap correctness check.
+- After writing, a quick `/wiki-lint` on the new page is a cheap correctness check.

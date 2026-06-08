@@ -3,7 +3,7 @@
 
 Ranks content pages under <vault>/wiki/ and writes a compact digest to
 <vault>/hot.md (vault root — deliberately outside wiki/, so it stays invisible
-to keyword search, /kb-lint, and the HTTP files API; the SessionStart hook
+to keyword search, /wiki-lint, and the HTTP files API; the SessionStart hook
 reads it directly from disk).
 
 Ranking signal (no external deps — stdlib only):

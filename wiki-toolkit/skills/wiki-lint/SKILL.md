@@ -1,16 +1,17 @@
 ---
-name: kb-lint
+name: wiki-lint
 description: >
   Health-check an llm_wiki enterprise vault against the企业级 schema. Validates required
   frontmatter (summary/bc/sdlc_phases), summary length, bc against wiki/_meta/bc-registry.yaml,
   sdlc_phases/type against scope-vocabulary.yaml, type↔directory routing, and dangling wikilinks.
   Read-only; emits a tiered report and only auto-fixes after explicit confirmation.
-  Triggers on: "/kb-lint", "kb-lint", "lint the wiki", "knowledge base health check",
-  "check frontmatter", "find dangling wikilinks", "wiki audit", "check bc consistency".
+  Triggers on: "/wiki-lint", "wiki-lint", "lint the wiki", "knowledge base health check",
+  "check frontmatter", "find dangling wikilinks", "wiki audit", "check bc consistency",
+  "/kb-lint", "kb-lint" (legacy name — renamed to wiki-lint for the wiki-* convention).
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
-# kb-lint: Enterprise Wiki Health Check
+# wiki-lint: Enterprise Wiki Health Check
 
 Validate every page under `wiki/` against the enterprise knowledge schema. **Read-only by
 default** — produce the report first, then ask before fixing anything.
@@ -79,7 +80,7 @@ type: bc-readme
 title: "Lint Report YYYY-MM-DD"
 bc: general
 sdlc_phases: []
-summary: kb-lint 巡检报告，记录本次扫描的页面数、各严重度问题数与明细。
+summary: wiki-lint 巡检报告，记录本次扫描的页面数、各严重度问题数与明细。
 tags: [meta, lint]
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
@@ -114,7 +115,7 @@ updated: YYYY-MM-DD
 
 ## Acceptance
 
-This skill satisfies the P1 acceptance criterion: **`/kb-lint` can surface pages missing a
+This skill satisfies the P1 acceptance criterion: **`/wiki-lint` can surface pages missing a
 `summary:`**. Check #3 reports every such page under ERROR.
 
 ---

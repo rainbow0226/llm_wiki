@@ -12,7 +12,7 @@ wiki-toolkit/
 │   ├── bc-registry.yaml      bounded context 注册表模板
 │   └── scope-vocabulary.yaml 受控词表模板
 ├── skills/               Claude Code skill 的权威副本（仓库内 .claude/ 被 gitignore）
-│   ├── kb-lint/SKILL.md         知识库巡检 lint
+│   ├── wiki-lint/SKILL.md         知识库巡检 lint
 │   ├── wiki-add/SKILL.md        写一页成品知识进 wiki（POST /sources 写入通道）
 │   ├── wiki-distill/SKILL.md    会话/调研 → learning 页（同写入通道）
 │   ├── wiki-find/SKILL.md       快速单跳召回，summary 直拼（~5s）
@@ -25,8 +25,8 @@ wiki-toolkit/
     └── build-hot.py            生成 <vault>/hot.md（最近更新 + 链接中心度；零依赖 stdlib）
 ```
 
-> 命名约定：知识库 skill 统一 `wiki-*` 前缀（写入 `wiki-add`/`wiki-distill`，检索 `wiki-find`/`wiki-find-deep`）。
-> `kb-lint` 是 P1 既有巡检 skill，保留原名。
+> 命名约定：知识库 skill 全部统一 `wiki-*` 前缀 —— 写入 `wiki-add`/`wiki-distill`，检索 `wiki-find`/`wiki-find-deep`，
+> 巡检 `wiki-lint`（原 `kb-lint`，已改名；旧名仍保留为触发别名）。
 
 ## 安装 skills
 
@@ -34,7 +34,7 @@ wiki-toolkit/
 消费端按需安装到工作目录的 `.claude/skills/`：
 
 ```
-cp -r wiki-toolkit/skills/{kb-lint,wiki-add,wiki-distill,wiki-find,wiki-find-deep} <work-dir>/.claude/skills/
+cp -r wiki-toolkit/skills/{wiki-lint,wiki-add,wiki-distill,wiki-find,wiki-find-deep} <work-dir>/.claude/skills/
 ```
 
 四个 `wiki-*` skill 走 HTTP API（写入 `POST /sources`，检索 `POST /search` + `GET /graph`），
@@ -66,7 +66,7 @@ python3 wiki-toolkit/scripts/build-hot.py --vault <vault>
   非阻塞（始终 exit 0），用 `stop_hook_active` 防循环；hot.md 在 **vault 根**（不在 `wiki/` 内），
   刷新它不会再触发变更 → 无环。
 - **hot.md 排序**：最近更新 + 链接中心度（入/出 `[[链接]]` 度数）。**访问频次维度待 P4 召回日志**。
-  hot.md 放 vault 根 → 对关键词搜索 / `/kb-lint` / 文件 API 隐形，仅 SessionStart hook 直接读盘。
+  hot.md 放 vault 根 → 对关键词搜索 / `/wiki-lint` / 文件 API 隐形，仅 SessionStart hook 直接读盘。
 
 ## 下发到消费者 vault
 
@@ -77,4 +77,4 @@ cp wiki-toolkit/_meta-templates/scope-vocabulary.yaml <vault>/wiki/_meta/
 ```
 
 页面模板按需取用（`templates/<type>.md`）。字段的权威定义在消费者 vault 的 `schema.md`；
-校验由 `/kb-lint` 完成。
+校验由 `/wiki-lint` 完成。
