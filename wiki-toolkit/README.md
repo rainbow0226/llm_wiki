@@ -12,8 +12,13 @@ wiki-toolkit/
 │   ├── bc-registry.yaml      bounded context 注册表模板
 │   └── scope-vocabulary.yaml 受控词表模板
 └── skills/               Claude Code skill 的权威副本（仓库内 .claude/ 被 gitignore）
-    └── kb-lint/SKILL.md      知识库巡检 lint
+    ├── kb-lint/SKILL.md       知识库巡检 lint
+    ├── wiki-add/SKILL.md      写一页成品知识进 wiki（POST /sources 写入通道）
+    └── wiki-distill/SKILL.md  会话/调研 → learning 页（同写入通道）
 ```
+
+> 命名约定：知识库 skill 统一 `wiki-*` 前缀（写入 `wiki-add`/`wiki-distill`，检索 `wiki-find`/`wiki-find-deep`）。
+> `kb-lint` 是 P1 既有巡检 skill，保留原名。
 
 ## 安装 skills
 
@@ -21,8 +26,11 @@ wiki-toolkit/
 消费端按需安装到工作目录的 `.claude/skills/`：
 
 ```
-cp -r wiki-toolkit/skills/kb-lint <work-dir>/.claude/skills/
+cp -r wiki-toolkit/skills/{kb-lint,wiki-add,wiki-distill} <work-dir>/.claude/skills/
 ```
+
+`wiki-add`/`wiki-distill` 走 HTTP 写入通道（`POST /api/v1/projects/{id}/sources`），
+鉴权用环境变量 `LLM_WIKI_API_TOKEN`（或 Settings → API Server 里允许无 token / 配 token）。
 
 ## 下发到消费者 vault
 
