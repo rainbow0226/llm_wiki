@@ -6,4 +6,5 @@ pub mod file_sync;
 pub mod fs;
 pub mod project;
 pub mod search;
+pub mod search_weights;
 pub mod vectorstore;

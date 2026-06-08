@@ -327,10 +327,14 @@ pub async fn search_project_inner(
         .map(|c| {
             let bm25 = bm25_score(&c.weighted_tf, c.doc_len, avg_doc_len, &idf);
             // Exact-match signals BM25's bag of words misses stay additive.
-            let score = bm25
+            let base = bm25
                 + if c.filename_exact { FILENAME_EXACT_BONUS } else { 0.0 }
                 + if c.title_has_phrase { PHRASE_IN_TITLE_BONUS } else { 0.0 }
                 + c.content_phrase_occ as f64 * PHRASE_IN_CONTENT_PER_OCC;
+            // DEVWIKI (P4③): bias the score by page type for the active SDLC
+            // phase (1.0 when no phase ⇒ identical to the un-phased ranking).
+            let score = base
+                * crate::commands::search_weights::type_weight(phase.as_deref(), &c.node_type);
             ProjectSearchResult {
                 path: c.path,
                 title: c.title,
@@ -697,6 +701,8 @@ struct DocCollect {
     title_has_phrase: bool,
     title_token_hit: bool,
     content_phrase_occ: usize,
+    // DEVWIKI (P4③): frontmatter `type`, for SDLC-phase type weighting.
+    node_type: String,
 }
 
 // DEVWIKI (P4③): approximate document length in "terms" for BM25 length
@@ -821,6 +827,9 @@ fn collect_doc(
         title_has_phrase,
         title_token_hit,
         content_phrase_occ,
+        node_type: frontmatter_field(content, "type")
+            .map(|t| t.to_lowercase())
+            .unwrap_or_default(),
     };
     (doc_len, Some(candidate))
 }
@@ -1815,6 +1824,56 @@ mod tests {
         assert!(out.results[0].path.ends_with("rare.md"));
         // And it strictly outscores every common-only page.
         assert!(out.results[1..].iter().all(|r| out.results[0].score > r.score));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // DEVWIKI (P4③): SDLC-phase type weighting flips ranking by page type.
+    #[tokio::test]
+    async fn phase_dev_ranks_playbook_above_decision() {
+        let root = tmp_project();
+        // Two pages with identical bodies/titles — only the `type` differs, so
+        // any ranking difference comes purely from phase type weighting.
+        let body = "# Deploy\n\nkubernetes deployment rollout steps and procedure.";
+        write_page(
+            &root,
+            "wiki/decisions/deploy-strategy.md",
+            &format!("---\ntype: decision\ntitle: Deploy\n---\n\n{body}"),
+        );
+        write_page(
+            &root,
+            "wiki/playbooks/deploy-runbook.md",
+            &format!("---\ntype: playbook\ntitle: Deploy\n---\n\n{body}"),
+        );
+
+        let run = |phase: Option<&str>| {
+            let root = root.clone();
+            let phase = phase.map(str::to_string);
+            async move {
+                search_project_inner(
+                    root.to_string_lossy().to_string(),
+                    "kubernetes deployment".into(),
+                    20,
+                    false,
+                    None,
+                    None,
+                    false,
+                    phase,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // No phase: identical scores ⇒ alphabetical path tiebreak puts the
+        // decision page (decisions/…) first.
+        let neutral = run(None).await;
+        assert_eq!(neutral.results.len(), 2);
+        assert!(neutral.results[0].path.ends_with("deploy-strategy.md"));
+
+        // phase=dev: playbook ×1.5 vs decision ×0.9 ⇒ playbook ranks first.
+        let dev = run(Some("dev")).await;
+        assert!(dev.results[0].path.ends_with("deploy-runbook.md"));
+        assert!(dev.results[0].score > dev.results[1].score);
         let _ = fs::remove_dir_all(root);
     }
 }

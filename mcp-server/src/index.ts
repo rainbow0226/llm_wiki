@@ -101,6 +101,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           include_content: { type: "boolean", description: "Include full page content in results when supported by the API." },
           // DEVWIKI: bounded-context filter
           bc: { type: "string", description: "Optional bounded-context filter (frontmatter `bc:`); only pages in this knowledge domain are returned." },
+          // DEVWIKI (P4③): SDLC phase type weighting
+          phase: { type: "string", description: "Optional SDLC phase (design/dev/test/ops): re-weights results by page type (e.g. dev favors playbooks/solutions over decisions)." },
         },
         required: ["query"],
         additionalProperties: false,
@@ -196,6 +198,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           topK: numberArg(args.top_k),
           includeContent: boolArg(args.include_content, false),
           bc: optionalStringArg(args.bc), // DEVWIKI: bounded-context filter
+          phase: optionalStringArg(args.phase), // DEVWIKI (P4③): SDLC phase
         })
         return textResult(formatSearchResults(query, search))
       }

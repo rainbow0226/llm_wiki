@@ -181,8 +181,9 @@ export class LlmWikiApiClient {
     }
   }
 
-  // DEVWIKI: search() carries the optional bounded-context filter (bc).
-  async search(projectId = "current", query: string, options: { topK?: number; includeContent?: boolean; bc?: string } = {}): Promise<ApiSearchResponse> {
+  // DEVWIKI: search() carries the optional bounded-context filter (bc) and
+  // SDLC phase (P4③ type weighting).
+  async search(projectId = "current", query: string, options: { topK?: number; includeContent?: boolean; bc?: string; phase?: string } = {}): Promise<ApiSearchResponse> {
     const json = await this.request(`/projects/${encodeURIComponent(projectId)}/search`, {
       method: "POST",
       body: {
@@ -190,6 +191,7 @@ export class LlmWikiApiClient {
         topK: options.topK,
         includeContent: options.includeContent,
         bc: options.bc, // DEVWIKI: bounded-context filter (omitted when undefined → JSON.stringify drops it)
+        phase: options.phase, // DEVWIKI (P4③): SDLC phase for type weighting
       },
     })
     return {
