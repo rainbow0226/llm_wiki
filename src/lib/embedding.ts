@@ -20,6 +20,7 @@
  * CORS-unfriendly endpoints work the same as the LLM path.
  */
 
+import yaml from "js-yaml"
 import { readFile, listDirectory } from "@/commands/fs"
 import { invoke } from "@tauri-apps/api/core"
 import type { EmbeddingConfig } from "@/stores/wiki-store"
@@ -27,6 +28,7 @@ import type { FileNode } from "@/types/wiki"
 import { normalizePath } from "@/lib/path-utils"
 import { getHttpFetch, isFetchNetworkError } from "@/lib/tauri-fetch"
 import { chunkMarkdown, type Chunk } from "@/lib/text-chunker"
+import { parseFrontmatter, type FrontmatterValue } from "@/lib/frontmatter"
 
 const RESERVED_EMBEDDING_HEADER_NAMES = new Set([
   "authorization",
@@ -341,20 +343,107 @@ export async function dropLegacyVectorTable(projectPath: string): Promise<void> 
   })
 }
 
-// ── Chunk enrichment ─────────────────────────────────────────────────────
+// ── Chunk enrichment + contextual prefix (DEVWIKI P2) ────────────────────
 
 /**
- * Build the text we actually embed for a chunk: page title + heading
- * breadcrumb + chunk content. The breadcrumb is the most important
- * context for a short chunk — a 300-char excerpt about "Mixture of
- * Experts" is far more findable when the embedded text explicitly
- * names its containing sections.
+ * A page's domain + document context, prepended to every chunk we embed.
+ * This is the "contextual retrieval" idea (Anthropic; claude-obsidian's
+ * contextual-prefix.py): a 300-char excerpt is far more findable when the
+ * embedded text situates it in its bounded context (bc) and its page, so a
+ * query phrased in domain vocabulary the chunk never repeats still matches.
  */
-function enrichChunkForEmbedding(
+export interface ChunkContext {
+  /** `bc` id resolved to "<title>：<description>" via bc-registry.yaml. */
+  bcLabel?: string
+  /** The page's own frontmatter `summary` (self-contained page gist). */
+  pageSummary?: string
+}
+
+/** id → {title, description} from a vault's bc-registry.yaml. */
+export type BcRegistry = Map<string, { title: string; description: string }>
+
+const MAX_BC_LABEL_CHARS = 140
+const MAX_PAGE_SUMMARY_CHARS = 220
+
+function fmString(v: FrontmatterValue | undefined): string {
+  if (typeof v === "string") return v.trim()
+  if (Array.isArray(v)) return v.join(" ").trim()
+  return ""
+}
+
+function clip(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max).trimEnd() + "…"
+}
+
+/**
+ * Read `<project>/wiki/_meta/bc-registry.yaml` into an id→{title,description}
+ * map. Any failure (missing file, bad YAML, no `contexts:` list) yields an
+ * empty map — contextual prefix then degrades to page-summary-only and never
+ * throws into the embed loop.
+ */
+export async function loadBcRegistry(projectPath: string): Promise<BcRegistry> {
+  const registry: BcRegistry = new Map()
+  try {
+    const raw = await readFile(`${normalizePath(projectPath)}/wiki/_meta/bc-registry.yaml`)
+    const parsed = yaml.load(raw) as { contexts?: Array<Record<string, unknown>> } | null
+    const contexts = parsed?.contexts
+    if (Array.isArray(contexts)) {
+      for (const c of contexts) {
+        const id = typeof c.id === "string" ? c.id.trim().toLowerCase() : ""
+        if (!id) continue
+        registry.set(id, {
+          title: typeof c.title === "string" ? c.title.trim() : id,
+          description: typeof c.description === "string" ? c.description.trim() : "",
+        })
+      }
+    }
+  } catch {
+    // no registry / unreadable → empty map (graceful)
+  }
+  return registry
+}
+
+/**
+ * Build a page's context (bc label + summary) once, from its frontmatter and
+ * the loaded bc-registry. Missing `summary`/`bc`, or a `bc` not in the
+ * registry, each degrade independently (an unregistered bc falls back to the
+ * raw id; a legacy page with neither yields `{}` → original behavior).
+ */
+export function buildChunkContext(content: string, registry: BcRegistry): ChunkContext {
+  const fm = parseFrontmatter(content).frontmatter
+  if (!fm) return {}
+  const ctx: ChunkContext = {}
+
+  const summary = fmString(fm.summary)
+  if (summary) ctx.pageSummary = clip(summary, MAX_PAGE_SUMMARY_CHARS)
+
+  const bcId = fmString(fm.bc).toLowerCase()
+  if (bcId) {
+    const entry = registry.get(bcId)
+    const label = entry
+      ? entry.description
+        ? `${entry.title}：${entry.description}`
+        : entry.title
+      : bcId
+    ctx.bcLabel = clip(label, MAX_BC_LABEL_CHARS)
+  }
+  return ctx
+}
+
+/**
+ * Build the text we actually embed for a chunk. Order: contextual prefix
+ * (domain → page gist) → page title → heading breadcrumb → chunk content.
+ * Labeled prefix lines (领域 / 摘要) read as context, not content. `context`
+ * is optional: omitted (or `{}`) reproduces the pre-DEVWIKI behavior exactly.
+ */
+export function enrichChunkForEmbedding(
   pageTitle: string,
   chunk: Chunk,
+  context?: ChunkContext,
 ): string {
   const parts: string[] = []
+  if (context?.bcLabel) parts.push(`领域：${context.bcLabel}`)
+  if (context?.pageSummary) parts.push(`摘要：${context.pageSummary}`)
   if (pageTitle.trim().length > 0) parts.push(pageTitle.trim())
   if (chunk.headingPath.trim().length > 0) parts.push(chunk.headingPath.trim())
   parts.push(chunk.text.trim())
@@ -368,7 +457,9 @@ function enrichChunkForEmbedding(
  * vectors in LanceDB in one batch. Every transient failure leaves the
  * existing v2 rows intact (empty upsert is a no-op Rust-side).
  *
- * Called by ingest.ts after writing a page to disk.
+ * Called by ingest.ts after writing a page to disk. `registry` is optional:
+ * bulk callers (embedAllPages) load the bc-registry once and pass it to avoid
+ * re-reading it per page; single-page callers omit it and it's loaded here.
  */
 export async function embedPage(
   projectPath: string,
@@ -376,6 +467,7 @@ export async function embedPage(
   title: string,
   content: string,
   cfg: EmbeddingConfig,
+  registry?: BcRegistry,
 ): Promise<void> {
   if (!cfg.enabled || !cfg.model) return
 
@@ -386,10 +478,14 @@ export async function embedPage(
   })
   if (chunks.length === 0) return
 
+  // DEVWIKI P2 contextual-prefix: situate every chunk in its bc + page summary.
+  const bcRegistry = registry ?? (await loadBcRegistry(projectPath))
+  const context = buildChunkContext(content, bcRegistry)
+
   const rows: ChunkUpsertInput[] = []
   let failedChunks = 0
   for (const chunk of chunks) {
-    const embedText = enrichChunkForEmbedding(title, chunk)
+    const embedText = enrichChunkForEmbedding(title, chunk, context)
     const vec = await fetchEmbedding(embedText, cfg)
     if (vec) {
       rows.push({
@@ -454,13 +550,17 @@ export async function embedAllPages(
   }
   walk(tree)
 
+  // Load the bc-registry once for the whole batch (each embedPage would
+  // otherwise re-read it per page).
+  const bcRegistry = await loadBcRegistry(pp)
+
   let done = 0
   for (const file of mdFiles) {
     try {
       const content = await readFile(file.path)
       const titleMatch = content.match(/^---\n[\s\S]*?^title:\s*["']?(.+?)["']?\s*$/m)
       const title = titleMatch ? titleMatch[1].trim() : file.id
-      await embedPage(pp, file.id, title, content, cfg)
+      await embedPage(pp, file.id, title, content, cfg, bcRegistry)
     } catch {
       // skip — individual file failure doesn't halt the batch
     }

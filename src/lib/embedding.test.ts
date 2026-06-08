@@ -44,8 +44,29 @@ import {
   dropLegacyVectorTable,
   getEmbeddingCount,
   removePageEmbedding,
+  enrichChunkForEmbedding,
+  buildChunkContext,
+  loadBcRegistry,
   type PageSearchResult,
+  type BcRegistry,
 } from "./embedding"
+import { readFile } from "@/commands/fs"
+import type { Chunk } from "@/lib/text-chunker"
+
+// Handle to the mocked readFile (see vi.mock("@/commands/fs") above) so the
+// contextual-prefix tests can script bc-registry.yaml reads.
+const mockReadFile = readFile as unknown as ReturnType<typeof vi.fn>
+
+/** Minimal Chunk for enrichment tests. */
+function makeChunk(text: string, headingPath = "", index = 0): Chunk {
+  return { index, text, headingPath, charStart: 0, charEnd: text.length, oversized: false }
+}
+
+/** Pull the `input` text out of the Nth captured embedding request. */
+function embedInput(call: number): string {
+  const body = mockHttpFetch.mock.calls[call][1]?.body as string
+  return (JSON.parse(body) as { input: string }).input
+}
 
 const cfg = {
   enabled: true,
@@ -1094,8 +1115,12 @@ describe("embedAllPages", () => {
     listDirectoryMock.mockResolvedValueOnce([
       { name: "rope.md", path: "/proj/wiki/rope.md", is_dir: false },
     ])
-    readFileMock.mockResolvedValueOnce(
-      `---\ntitle: "RoPE 旋转位置编码"\ntype: concept\n---\n# RoPE\n\nBody.`,
+    // Path-aware: the registry read (embedAllPages loads it once) returns
+    // empty; the page read returns the frontmatter doc.
+    readFileMock.mockImplementation(async (p: string) =>
+      p.endsWith("bc-registry.yaml")
+        ? ""
+        : `---\ntitle: "RoPE 旋转位置编码"\ntype: concept\n---\n# RoPE\n\nBody.`,
     )
     mockHttpFetch.mockImplementation(async () => okResponse([0.5]))
     await embedAllPages("/proj", cfg)
@@ -1107,7 +1132,9 @@ describe("embedAllPages", () => {
     listDirectoryMock.mockResolvedValueOnce([
       { name: "mystery.md", path: "/proj/wiki/mystery.md", is_dir: false },
     ])
-    readFileMock.mockResolvedValueOnce("no frontmatter here, just body.")
+    readFileMock.mockImplementation(async (p: string) =>
+      p.endsWith("bc-registry.yaml") ? "" : "no frontmatter here, just body.",
+    )
     mockHttpFetch.mockImplementation(async () => okResponse([0.5]))
     await embedAllPages("/proj", cfg)
     const body = JSON.parse((mockHttpFetch.mock.calls[0][1] as RequestInit).body as string)
@@ -1147,10 +1174,13 @@ describe("embedAllPages", () => {
       { name: "a.md", path: "/proj/wiki/a.md", is_dir: false },
       { name: "b.md", path: "/proj/wiki/b.md", is_dir: false },
     ])
-    // First file fails, second succeeds.
-    readFileMock
-      .mockRejectedValueOnce(new Error("permission denied"))
-      .mockResolvedValueOnce("body for b")
+    // First file fails, second succeeds. Registry read (first, by
+    // embedAllPages) returns empty; per-file reads keyed by path.
+    readFileMock.mockImplementation(async (p: string) => {
+      if (p.endsWith("bc-registry.yaml")) return ""
+      if (p.endsWith("a.md")) throw new Error("permission denied")
+      return "body for b"
+    })
     mockHttpFetch.mockImplementation(async () => okResponse([0.5]))
 
     const count = await embedAllPages("/proj", cfg)
@@ -1213,5 +1243,181 @@ describe("legacyVectorRowCount / dropLegacyVectorTable / getEmbeddingCount / rem
     mockInvoke.mockRejectedValueOnce(new Error("table missing"))
     // Must not throw — source-delete flow depends on silent failure.
     await expect(removePageEmbedding("/proj", "rope")).resolves.toBeUndefined()
+  })
+})
+
+// ── DEVWIKI P2: contextual-prefix embedding ────────────────────────────────
+
+describe("enrichChunkForEmbedding — contextual prefix", () => {
+  const chunk = makeChunk("rotary embeddings rotate the query/key vectors", "## RoPE > ### Math")
+
+  it("reproduces the pre-DEVWIKI shape when no context is given", () => {
+    expect(enrichChunkForEmbedding("RoPE", chunk)).toBe(
+      "RoPE\n\n## RoPE > ### Math\n\nrotary embeddings rotate the query/key vectors",
+    )
+    // An empty context object is identical to no context.
+    expect(enrichChunkForEmbedding("RoPE", chunk, {})).toBe(enrichChunkForEmbedding("RoPE", chunk))
+  })
+
+  it("prepends 领域 then 摘要 ahead of title/heading/chunk, in that order", () => {
+    const out = enrichChunkForEmbedding("RoPE", chunk, {
+      bcLabel: "位置编码：序列位置如何注入注意力",
+      pageSummary: "RoPE 用旋转矩阵编码相对位置。",
+    })
+    expect(out).toBe(
+      "领域：位置编码：序列位置如何注入注意力\n\n" +
+        "摘要：RoPE 用旋转矩阵编码相对位置。\n\n" +
+        "RoPE\n\n## RoPE > ### Math\n\nrotary embeddings rotate the query/key vectors",
+    )
+    // Order invariant: 领域 before 摘要 before the title.
+    expect(out.indexOf("领域：")).toBeLessThan(out.indexOf("摘要："))
+    expect(out.indexOf("摘要：")).toBeLessThan(out.indexOf("RoPE"))
+  })
+
+  it("includes only the context fields that are present", () => {
+    expect(enrichChunkForEmbedding("T", makeChunk("body"), { bcLabel: "payment" })).toBe(
+      "领域：payment\n\nT\n\nbody",
+    )
+    expect(enrichChunkForEmbedding("T", makeChunk("body"), { pageSummary: "gist" })).toBe(
+      "摘要：gist\n\nT\n\nbody",
+    )
+  })
+
+  it("still emits the chunk text when title and heading are empty", () => {
+    expect(enrichChunkForEmbedding("", makeChunk("just body"), { bcLabel: "d" })).toBe(
+      "领域：d\n\njust body",
+    )
+  })
+})
+
+describe("buildChunkContext", () => {
+  const registry: BcRegistry = new Map([
+    ["payment", { title: "支付", description: "下单到结算的资金流转" }],
+    ["nodesc", { title: "无描述域", description: "" }],
+  ])
+
+  function page(fm: string, body = "正文内容"): string {
+    return `---\n${fm}\n---\n\n${body}`
+  }
+
+  it("resolves a registered bc to '<title>：<description>' and carries the summary", () => {
+    const ctx = buildChunkContext(page('bc: payment\nsummary: "本页讲支付重试"'), registry)
+    expect(ctx.bcLabel).toBe("支付：下单到结算的资金流转")
+    expect(ctx.pageSummary).toBe("本页讲支付重试")
+  })
+
+  it("falls back to the raw bc id when it is not in the registry", () => {
+    expect(buildChunkContext(page("bc: crosschain"), registry).bcLabel).toBe("crosschain")
+  })
+
+  it("uses just the title when the registered context has no description", () => {
+    expect(buildChunkContext(page("bc: nodesc"), registry).bcLabel).toBe("无描述域")
+  })
+
+  it("is case-insensitive on the bc id", () => {
+    expect(buildChunkContext(page("bc: PAYMENT"), registry).bcLabel).toBe(
+      "支付：下单到结算的资金流转",
+    )
+  })
+
+  it("returns {} for a page with no frontmatter (legacy page → no prefix)", () => {
+    expect(buildChunkContext("# Title\n\nbody only", registry)).toEqual({})
+  })
+
+  it("carries summary even when bc is absent, and vice versa", () => {
+    expect(buildChunkContext(page('summary: "只有摘要"'), registry)).toEqual({
+      pageSummary: "只有摘要",
+    })
+    expect(buildChunkContext(page("bc: payment"), registry).pageSummary).toBeUndefined()
+  })
+
+  it("clips an overlong summary to 220 chars + ellipsis", () => {
+    const long = "字".repeat(400)
+    const ctx = buildChunkContext(page(`summary: "${long}"`), registry)
+    expect(ctx.pageSummary).toHaveLength(221) // 220 + the … character
+    expect(ctx.pageSummary?.endsWith("…")).toBe(true)
+  })
+})
+
+describe("loadBcRegistry", () => {
+  beforeEach(() => mockReadFile.mockReset())
+
+  it("parses contexts into an id→{title,description} map", async () => {
+    mockReadFile.mockResolvedValueOnce(
+      "version: 1\ncontexts:\n" +
+        "  - id: Payment\n    title: 支付\n    description: 资金流转\n    status: active\n" +
+        "  - id: bitcoin\n    title: Bitcoin\n    description: BTC 协议\n    status: active\n",
+    )
+    const reg = await loadBcRegistry("/proj")
+    expect(reg.get("payment")).toEqual({ title: "支付", description: "资金流转" }) // id lowercased
+    expect(reg.get("bitcoin")?.title).toBe("Bitcoin")
+    expect(reg.size).toBe(2)
+    // Reads the registry from the conventional vault path.
+    expect(mockReadFile).toHaveBeenCalledWith("/proj/wiki/_meta/bc-registry.yaml")
+  })
+
+  it("returns an empty map when the file is missing (readFile rejects)", async () => {
+    mockReadFile.mockRejectedValueOnce(new Error("ENOENT"))
+    expect((await loadBcRegistry("/proj")).size).toBe(0)
+  })
+
+  it("returns an empty map on malformed YAML", async () => {
+    mockReadFile.mockResolvedValueOnce("contexts: [this: is: not: valid")
+    expect((await loadBcRegistry("/proj")).size).toBe(0)
+  })
+
+  it("returns an empty map when there is no contexts list", async () => {
+    mockReadFile.mockResolvedValueOnce("version: 1\nupdated: 2026-06-08\n")
+    expect((await loadBcRegistry("/proj")).size).toBe(0)
+  })
+})
+
+describe("embedPage — contextual prefix wiring (end-to-end)", () => {
+  beforeEach(() => mockReadFile.mockReset())
+
+  const registryYaml =
+    "contexts:\n  - id: payment\n    title: 支付\n    description: 下单到结算的资金流转\n    status: active\n"
+  const page =
+    '---\ntype: solution\ntitle: "方案：支付重试"\nsummary: "用指数退避重试失败支付，幂等键防重复扣款。"\nbc: payment\n---\n\n' +
+    "# 方案：支付重试\n\n失败后按指数退避重试，配合幂等键。"
+
+  it("embeds chunk text that carries the bc label and page summary", async () => {
+    mockReadFile.mockResolvedValueOnce(registryYaml) // loadBcRegistry reads this
+    mockHttpFetch.mockImplementation(async () => okResponse([0.1, 0.2, 0.3]))
+
+    await embedPage("/tmp/p", "payment-retry", "方案：支付重试", page, cfg)
+
+    expect(mockHttpFetch).toHaveBeenCalledTimes(1)
+    const input = embedInput(0)
+    expect(input).toContain("领域：支付：下单到结算的资金流转")
+    expect(input).toContain("摘要：用指数退避重试失败支付")
+    expect(input).toContain("失败后按指数退避重试") // the actual chunk body still present
+    // Prefix precedes the body.
+    expect(input.indexOf("领域：")).toBeLessThan(input.indexOf("失败后按指数退避重试"))
+    // The stored chunk_text is the RAW chunk, NOT the enriched embed input.
+    const payload = mockInvoke.mock.calls[0][1] as { chunks: Array<{ chunk_text: string }> }
+    expect(payload.chunks[0].chunk_text).not.toContain("领域：")
+  })
+
+  it("uses a precomputed registry without re-reading the file", async () => {
+    const reg: BcRegistry = new Map([["payment", { title: "支付", description: "资金流转" }]])
+    mockHttpFetch.mockImplementation(async () => okResponse([0.4]))
+
+    await embedPage("/tmp/p", "payment-retry", "方案", page, cfg, reg)
+
+    expect(mockReadFile).not.toHaveBeenCalled() // registry was passed in
+    expect(embedInput(0)).toContain("领域：支付：资金流转")
+  })
+
+  it("degrades to no prefix for a legacy page without bc/summary", async () => {
+    mockReadFile.mockResolvedValueOnce(registryYaml)
+    mockHttpFetch.mockImplementation(async () => okResponse([0.1]))
+
+    await embedPage("/tmp/p", "rope", "RoPE", "# RoPE\n\nrotary positional embeddings explained here", cfg)
+
+    const input = embedInput(0)
+    expect(input).not.toContain("领域：")
+    expect(input).not.toContain("摘要：")
+    expect(input.startsWith("RoPE")).toBe(true)
   })
 })

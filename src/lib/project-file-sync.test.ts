@@ -85,6 +85,10 @@ const mocks = vi.hoisted(() => {
     enqueueBatch: vi.fn(async () => []),
     removeFromIngestCache: vi.fn(async () => undefined),
     removePageEmbedding: vi.fn(async () => undefined),
+    embedPage: vi.fn(
+      async (_pp?: string, _id?: string, _title?: string, _content?: string, _cfg?: unknown) =>
+        undefined,
+    ),
     cascadeDeleteWikiPagesWithRefs: vi.fn(async () => ({
       deletedPaths: [] as string[],
       rewrittenFiles: 0,
@@ -121,6 +125,7 @@ vi.mock("@/lib/ingest-cache", () => ({
 
 vi.mock("@/lib/embedding", () => ({
   removePageEmbedding: mocks.removePageEmbedding,
+  embedPage: mocks.embedPage,
 }))
 
 vi.mock("@/lib/wiki-page-delete", () => ({
@@ -201,7 +206,7 @@ describe("project file sync", () => {
     void startProjectFileSync(project)
 
     await vi.waitFor(() => {
-      expect(mocks.listen).toHaveBeenCalledTimes(2)
+      expect(mocks.listen).toHaveBeenCalledTimes(3)
     })
 
     mocks.emit("file-sync://changed", {
@@ -260,7 +265,7 @@ describe("project file sync", () => {
     void startProjectFileSync(project)
 
     await vi.waitFor(() => {
-      expect(mocks.listen).toHaveBeenCalledTimes(2)
+      expect(mocks.listen).toHaveBeenCalledTimes(3)
     })
 
     mocks.emit("file-sync://changed", {
@@ -380,7 +385,7 @@ describe("project file sync", () => {
     void startProjectFileSync(project)
 
     await vi.waitFor(() => {
-      expect(mocks.listen).toHaveBeenCalledTimes(2)
+      expect(mocks.listen).toHaveBeenCalledTimes(3)
     })
 
     const baseTask = {
@@ -418,7 +423,7 @@ describe("project file sync", () => {
     useWikiStore.getState().setProject(project)
     void startProjectFileSync(project)
     await vi.waitFor(() => {
-      expect(mocks.listen).toHaveBeenCalledTimes(2)
+      expect(mocks.listen).toHaveBeenCalledTimes(3)
     })
 
     mocks.rescanProjectFiles.mockImplementation(async (projectId: string) => ({
@@ -558,7 +563,7 @@ describe("project file sync", () => {
 
     void startProjectFileSync(project)
     await vi.waitFor(() => {
-      expect(mocks.listen).toHaveBeenCalledTimes(2)
+      expect(mocks.listen).toHaveBeenCalledTimes(3)
     })
 
     mocks.emit("file-sync://changed", {
@@ -627,7 +632,7 @@ describe("project file sync", () => {
 
     void startProjectFileSync(project)
     await vi.waitFor(() => {
-      expect(mocks.listen).toHaveBeenCalledTimes(2)
+      expect(mocks.listen).toHaveBeenCalledTimes(3)
     })
 
     mocks.emit("file-sync://changed", {
@@ -693,7 +698,7 @@ describe("project file sync", () => {
 
     void startProjectFileSync(project)
     await vi.waitFor(() => {
-      expect(mocks.listen).toHaveBeenCalledTimes(2)
+      expect(mocks.listen).toHaveBeenCalledTimes(3)
     })
 
     mocks.emit("file-sync://changed", {
@@ -730,5 +735,87 @@ describe("project file sync", () => {
       expect(mocks.cascadeDeleteWikiPagesWithRefs).toHaveBeenCalledTimes(1)
     })
     expect(mocks.listDirectory.mock.calls.filter(([path]) => path === "/tmp/a/wiki")).toHaveLength(1)
+  })
+})
+
+// DEVWIKI P2: the wiki://embed-page bridge — pages written via POST /sources
+// are embedded through the canonical embedPage pipeline (the file watcher does
+// NOT auto-embed wiki writes, so this listener is the only thing that does).
+describe("wiki://embed-page bridge", () => {
+  const enabledCfg = {
+    enabled: true,
+    endpoint: "http://127.0.0.1:1234/v1/embeddings",
+    apiKey: "",
+    model: "test-embed",
+  }
+
+  beforeEach(async () => {
+    vi.useRealTimers()
+    vi.clearAllMocks()
+    const { stopProjectFileSync } = await import("@/lib/project-file-sync")
+    await stopProjectFileSync() // unregister any leaked listeners from a prior test
+    const { useWikiStore } = await import("@/stores/wiki-store")
+    useWikiStore.getState().setProject(null)
+    mocks.readFile.mockImplementation(async () => "")
+  })
+
+  async function startSyncFor(projectId: string) {
+    const { startProjectFileSync } = await import("@/lib/project-file-sync")
+    const { useWikiStore } = await import("@/stores/wiki-store")
+    const project = { id: projectId, name: projectId, path: `/tmp/${projectId}` }
+    useWikiStore.getState().setProject(project)
+    void startProjectFileSync(project)
+    await vi.waitFor(() => expect(mocks.listen).toHaveBeenCalledTimes(3))
+    return useWikiStore
+  }
+
+  it("embeds a wiki page via the canonical embedPage pipeline when embedding is enabled", async () => {
+    const store = await startSyncFor("A")
+    store.getState().setEmbeddingConfig(enabledCfg)
+    mocks.readFile.mockImplementation(async () =>
+      '---\ntitle: "支付重试方案"\nbc: payment\nsummary: "退避重试"\n---\n\n正文',
+    )
+
+    mocks.emit("wiki://embed-page", { projectId: "A", pageId: "payment-retry", path: "wiki/solutions/payment-retry.md" })
+
+    await vi.waitFor(() => expect(mocks.embedPage).toHaveBeenCalledTimes(1))
+    const [pp, pageId, title, content, cfg] = mocks.embedPage.mock.calls[0]
+    expect(pp).toBe("/tmp/A")
+    expect(pageId).toBe("payment-retry")
+    expect(title).toBe("支付重试方案") // pulled from frontmatter, not the slug
+    expect(content).toContain("正文")
+    expect(cfg).toMatchObject({ enabled: true, model: "test-embed" })
+  })
+
+  it("skips structural pages (index/log/overview)", async () => {
+    const store = await startSyncFor("A")
+    store.getState().setEmbeddingConfig(enabledCfg)
+
+    for (const id of ["index", "log", "overview"]) {
+      mocks.emit("wiki://embed-page", { projectId: "A", pageId: id, path: `wiki/${id}.md` })
+    }
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(mocks.embedPage).not.toHaveBeenCalled()
+  })
+
+  it("no-ops when embedding is disabled (page still on disk, keyword-searchable)", async () => {
+    const store = await startSyncFor("A")
+    store.getState().setEmbeddingConfig({ ...enabledCfg, enabled: false })
+
+    mocks.emit("wiki://embed-page", { projectId: "A", pageId: "p", path: "wiki/concepts/p.md" })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(mocks.embedPage).not.toHaveBeenCalled()
+  })
+
+  it("ignores events for a different project", async () => {
+    const store = await startSyncFor("A")
+    store.getState().setEmbeddingConfig(enabledCfg)
+
+    mocks.emit("wiki://embed-page", { projectId: "OTHER", pageId: "p", path: "wiki/concepts/p.md" })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(mocks.embedPage).not.toHaveBeenCalled()
   })
 })
