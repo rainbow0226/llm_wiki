@@ -15,6 +15,7 @@ import {
   type ApiReviewsResponse,
   type ApiSearchResult,
 } from "./api-client.js"
+import { traverseGraph } from "./graph-traverse.js"
 
 const VERSION = "0.4.20"
 const DEFAULT_PROJECT_ID = "current"
@@ -120,6 +121,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "llm_wiki_graph_traverse",
+      description: "Breadth-first multi-hop traversal of the knowledge graph from a seed page. Returns the reached sub-graph grouped by hop distance — use it to expand context around a page along [[wikilinks]] (e.g. prerequisites, related decisions).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: { type: "string", description: "Project UUID, project path, or 'current'. Defaults to current." },
+          seed: { type: "string", description: "Seed page id (file stem) or title to start from." },
+          depth: { type: "number", description: "Hop distance to expand (1-3). Defaults to 2." },
+          max_nodes: { type: "number", description: "Maximum nodes to return. Defaults to 50." },
+        },
+        required: ["seed"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "llm_wiki_rescan_sources",
       description: "Trigger the desktop app's source folder rescan for a project, using the user's Source Watch rules.",
       inputSchema: {
@@ -190,6 +206,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit: numberArg(args.limit),
         })
         return textResult(formatGraph(graph.nodes, graph.edges))
+      }
+      case "llm_wiki_graph_traverse": {
+        await assertMcpEnabled()
+        const seed = stringArg(args.seed, "seed")
+        const depth = Math.min(Math.max(numberArg(args.depth) ?? 2, 1), 3)
+        const maxNodes = Math.min(Math.max(numberArg(args.max_nodes) ?? 50, 1), 200)
+        // Fetch the full graph, then BFS client-side so a single endpoint
+        // serves both visualization and traversal.
+        const graph = await client.graph(projectId(args), { limit: 1000 })
+        return textResult(traverseGraph(graph.nodes, graph.edges, seed, depth, maxNodes))
       }
       case "llm_wiki_rescan_sources": {
         await assertMcpEnabled()

@@ -44,6 +44,8 @@ export interface ApiGraphNode {
   path?: string
   linkCount?: number
   weight?: number
+  // DEVWIKI (P3): Louvain community id, present when ?with_insights=true.
+  community?: number
 }
 
 export interface ApiGraphEdge {
@@ -324,6 +326,7 @@ function parseGraphNode(value: unknown): ApiGraphNode {
     path: typeof obj.path === "string" ? obj.path : undefined,
     linkCount: numberOrUndefined(obj.linkCount),
     weight: numberOrUndefined(obj.weight),
+    community: numberOrUndefined(obj.community),
   }
 }
 
