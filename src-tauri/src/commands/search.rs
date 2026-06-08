@@ -17,8 +17,16 @@ const FILENAME_EXACT_BONUS: f64 = 200.0;
 const PHRASE_IN_TITLE_BONUS: f64 = 50.0;
 const PHRASE_IN_CONTENT_PER_OCC: f64 = 20.0;
 const MAX_PHRASE_OCC_COUNTED: usize = 10;
-const TITLE_TOKEN_WEIGHT: f64 = 5.0;
-const CONTENT_TOKEN_WEIGHT: f64 = 1.0;
+// DEVWIKI (P4③): Okapi BM25 parameters. k1 controls term-frequency
+// saturation, b controls length normalization (the standard defaults).
+const BM25_K1: f64 = 1.5;
+const BM25_B: f64 = 0.75;
+// DEVWIKI (P4③): field boosts folded into the BM25 term frequency. The
+// document body counts a term once (weight 1); occurrences in the title and
+// `summary` frontmatter add extra weight on top, so a title term effectively
+// counts 3× and a summary term 2× (the plan's "summary 2× boost").
+const BM25_TITLE_EXTRA_WEIGHT: f64 = 2.0;
+const BM25_SUMMARY_EXTRA_WEIGHT: f64 = 1.0;
 const SNIPPET_CONTEXT: usize = 80;
 const SEARCH_EMBEDDING_TIMEOUT_SECS: u64 = 8;
 const MAX_SEARCH_FILES: usize = 10_000;
@@ -222,8 +230,18 @@ pub async fn search_project_inner(
         tokens
     };
     let query_phrase = trim_query_punctuation(&query.to_lowercase());
-    let mut results = Vec::new();
     let mut page_paths_by_stem = BTreeMap::new();
+
+    // DEVWIKI (P4③): BM25 needs corpus statistics (N, document frequency per
+    // term, average document length) that no single file knows, so the keyword
+    // pass is now two phases. Phase 1 walks the (bc-eligible) corpus collecting
+    // each candidate's weighted term frequencies + length and the global stats;
+    // phase 2 computes IDF and scores. When a bc filter is set, "the corpus" is
+    // that bounded context's pages only — IDF/avgdl are scoped to it.
+    let mut collected: Vec<DocCollect> = Vec::new();
+    let mut doc_freq: BTreeMap<String, usize> = BTreeMap::new();
+    let mut total_doc_len = 0.0_f64;
+    let mut doc_count = 0_usize;
 
     let wiki_root = Path::new(&project_path).join("wiki");
     if wiki_root.exists() {
@@ -266,7 +284,8 @@ pub async fn search_project_inner(
                     );
                 }
             }
-            if let Some(hit) = score_file(
+            // Every bc-eligible doc counts toward N and avgdl, even non-matches.
+            let (doc_len, candidate) = collect_doc(
                 &project_path,
                 entry.path(),
                 &content,
@@ -274,11 +293,56 @@ pub async fn search_project_inner(
                 &query_phrase,
                 &query,
                 include_content,
-            ) {
-                results.push(hit);
+            );
+            total_doc_len += doc_len;
+            doc_count += 1;
+            if let Some(candidate) = candidate {
+                // df only comes from candidates (a term-bearing doc is one).
+                for term in candidate.weighted_tf.keys() {
+                    *doc_freq.entry(term.clone()).or_insert(0) += 1;
+                }
+                collected.push(candidate);
             }
         }
     }
+
+    // Phase 2: IDF from corpus df, then BM25 + exact-match bonuses per candidate.
+    let n_docs = doc_count as f64;
+    let avg_doc_len = if doc_count > 0 {
+        total_doc_len / n_docs
+    } else {
+        1.0
+    };
+    let idf: BTreeMap<String, f64> = doc_freq
+        .iter()
+        .map(|(term, &df)| {
+            let df = df as f64;
+            // Floored IDF: ln(1 + (N - df + 0.5)/(df + 0.5)) is always ≥ 0.
+            (term.clone(), (1.0 + (n_docs - df + 0.5) / (df + 0.5)).ln())
+        })
+        .collect();
+
+    let mut results: Vec<ProjectSearchResult> = collected
+        .into_iter()
+        .map(|c| {
+            let bm25 = bm25_score(&c.weighted_tf, c.doc_len, avg_doc_len, &idf);
+            // Exact-match signals BM25's bag of words misses stay additive.
+            let score = bm25
+                + if c.filename_exact { FILENAME_EXACT_BONUS } else { 0.0 }
+                + if c.title_has_phrase { PHRASE_IN_TITLE_BONUS } else { 0.0 }
+                + c.content_phrase_occ as f64 * PHRASE_IN_CONTENT_PER_OCC;
+            ProjectSearchResult {
+                path: c.path,
+                title: c.title,
+                snippet: c.snippet,
+                title_match: c.title_token_hit || c.title_has_phrase,
+                score,
+                vector_score: None,
+                images: c.images,
+                content: c.content,
+            }
+        })
+        .collect();
 
     let mut token_sorted = (0..results.len()).collect::<Vec<_>>();
     token_sorted.sort_by(|a, b| {
@@ -618,7 +682,74 @@ fn build_vector_snippet(result: &PageVectorResult) -> String {
     }
 }
 
-fn score_file(
+// DEVWIKI (P4③): a keyword candidate gathered in phase 1 of the BM25 pass.
+// Holds everything needed to score (weighted term frequencies + length) and to
+// build the result (title/snippet/images), so phase 2 needs no second file read.
+struct DocCollect {
+    path: String,
+    title: String,
+    snippet: String,
+    images: Vec<SearchImageRef>,
+    content: Option<String>,
+    weighted_tf: BTreeMap<String, f64>,
+    doc_len: f64,
+    filename_exact: bool,
+    title_has_phrase: bool,
+    title_token_hit: bool,
+    content_phrase_occ: usize,
+}
+
+// DEVWIKI (P4③): approximate document length in "terms" for BM25 length
+// normalization — each CJK character is one term, each run of Latin
+// letters/digits is one term. Cheap (one pass), and only needs to be
+// consistent across documents, not linguistically exact.
+fn approx_doc_length(text: &str) -> f64 {
+    let mut len = 0usize;
+    let mut in_word = false;
+    for c in text.chars() {
+        if ('\u{3400}'..='\u{9fff}').contains(&c) {
+            len += 1;
+            in_word = false;
+        } else if c.is_alphanumeric() {
+            if !in_word {
+                len += 1;
+                in_word = true;
+            }
+        } else {
+            in_word = false;
+        }
+    }
+    len as f64
+}
+
+// DEVWIKI (P4③): Okapi BM25 over field-weighted term frequencies.
+//   score = Σ_t IDF(t) · tf~(t)·(k1+1) / (tf~(t) + k1·(1 − b + b·dl/avgdl))
+// where tf~ already folds in the title/summary field boosts. Terms with
+// non-positive IDF (present in (nearly) every doc) contribute nothing.
+fn bm25_score(
+    weighted_tf: &BTreeMap<String, f64>,
+    doc_len: f64,
+    avg_doc_len: f64,
+    idf: &BTreeMap<String, f64>,
+) -> f64 {
+    let avg_doc_len = avg_doc_len.max(1.0);
+    let norm = 1.0 - BM25_B + BM25_B * (doc_len / avg_doc_len);
+    let mut score = 0.0;
+    for (term, &tf) in weighted_tf {
+        let idf_t = idf.get(term).copied().unwrap_or(0.0);
+        if idf_t <= 0.0 || tf <= 0.0 {
+            continue;
+        }
+        score += idf_t * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * norm);
+    }
+    score
+}
+
+// DEVWIKI (P4③): phase 1 of the keyword pass — detect a candidate and gather
+// its weighted term frequencies + length. Returns the document length for every
+// doc (so non-matches still feed N/avgdl) plus a candidate when there is any
+// keyword signal (term hit, exact filename, or phrase match).
+fn collect_doc(
     project_path: &str,
     path: &Path,
     content: &str,
@@ -626,41 +757,47 @@ fn score_file(
     query_phrase: &str,
     query: &str,
     include_content: bool,
-) -> Option<ProjectSearchResult> {
+) -> (f64, Option<DocCollect>) {
+    let doc_len = approx_doc_length(content);
     let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let title = extract_title(content, file_name);
     let title_text = format!("{title} {file_name}");
     let title_lower = title_text.to_lowercase();
     let content_lower = content.to_lowercase();
+    let summary_lower = frontmatter_field(content, "summary")
+        .unwrap_or_default()
+        .to_lowercase();
     let stem = file_name.trim_end_matches(".md").to_lowercase();
 
     let filename_exact = !query_phrase.is_empty() && stem == query_phrase;
     let title_has_phrase = !query_phrase.is_empty() && title_lower.contains(query_phrase);
     let content_phrase_occ =
         count_occurrences(&content_lower, query_phrase).min(MAX_PHRASE_OCC_COUNTED);
-    let title_token_score = token_match_score(&title_text, tokens);
-    let content_token_score = token_match_score(content, tokens);
 
-    if !filename_exact
-        && !title_has_phrase
-        && content_phrase_occ == 0
-        && title_token_score == 0
-        && content_token_score == 0
-    {
-        return None;
+    // Field-weighted term frequency: the body counts a term once; title and
+    // summary occurrences add extra weight (effective title 3×, summary 2×).
+    let mut weighted_tf: BTreeMap<String, f64> = BTreeMap::new();
+    let mut title_token_hit = false;
+    for token in tokens {
+        let body_occ = count_occurrences(&content_lower, token);
+        let title_occ = count_occurrences(&title_lower, token);
+        let summary_occ = count_occurrences(&summary_lower, token);
+        if title_occ > 0 {
+            title_token_hit = true;
+        }
+        let tf = body_occ as f64
+            + BM25_TITLE_EXTRA_WEIGHT * title_occ as f64
+            + BM25_SUMMARY_EXTRA_WEIGHT * summary_occ as f64;
+        if tf > 0.0 {
+            weighted_tf.insert(token.clone(), tf);
+        }
     }
 
-    let score = (if filename_exact {
-        FILENAME_EXACT_BONUS
-    } else {
-        0.0
-    }) + (if title_has_phrase {
-        PHRASE_IN_TITLE_BONUS
-    } else {
-        0.0
-    }) + content_phrase_occ as f64 * PHRASE_IN_CONTENT_PER_OCC
-        + title_token_score as f64 * TITLE_TOKEN_WEIGHT
-        + content_token_score as f64 * CONTENT_TOKEN_WEIGHT;
+    let has_signal =
+        filename_exact || title_has_phrase || content_phrase_occ > 0 || !weighted_tf.is_empty();
+    if !has_signal {
+        return (doc_len, None);
+    }
 
     let snippet_anchor = if content_phrase_occ > 0 {
         query_phrase.to_string()
@@ -672,16 +809,20 @@ fn score_file(
             .unwrap_or_else(|| query.to_string())
     };
 
-    Some(ProjectSearchResult {
+    let candidate = DocCollect {
         path: relative_to_project(project_path, path),
         title,
         snippet: build_snippet(content, &snippet_anchor),
-        title_match: title_token_score > 0 || title_has_phrase,
-        score,
-        vector_score: None,
         images: extract_image_refs(content),
-        content: include_content.then_some(content.to_string()),
-    })
+        content: include_content.then(|| content.to_string()),
+        weighted_tf,
+        doc_len,
+        filename_exact,
+        title_has_phrase,
+        title_token_hit,
+        content_phrase_occ,
+    };
+    (doc_len, Some(candidate))
 }
 
 pub fn tokenize_query(query: &str) -> Vec<String> {
@@ -790,14 +931,6 @@ fn is_stop_word(token: &str) -> bool {
 
 fn trim_query_punctuation(value: &str) -> String {
     value.trim_matches(is_query_separator).to_string()
-}
-
-fn token_match_score(text: &str, tokens: &[String]) -> usize {
-    let lower = text.to_lowercase();
-    tokens
-        .iter()
-        .filter(|token| lower.contains(token.as_str()))
-        .count()
 }
 
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
@@ -1594,5 +1727,94 @@ mod tests {
         assert_eq!(c1.keyword_score, None);
         assert_eq!(c1.vector_rank, Some(2));
         assert_eq!(c1.final_rank, 2);
+    }
+
+    // DEVWIKI (P4③): BM25 tests.
+    #[test]
+    fn bm25_score_saturates_and_normalizes() {
+        let idf = BTreeMap::from([("t".to_string(), 1.0)]);
+        let tf1 = BTreeMap::from([("t".to_string(), 1.0)]);
+        let tf2 = BTreeMap::from([("t".to_string(), 2.0)]);
+        let avg = 10.0;
+
+        // More term frequency scores higher, but sub-linearly (TF saturation).
+        let s1 = bm25_score(&tf1, 10.0, avg, &idf);
+        let s2 = bm25_score(&tf2, 10.0, avg, &idf);
+        assert!(s2 > s1);
+        assert!(s2 < 2.0 * s1, "doubling tf should less-than-double score");
+
+        // Length normalization: a shorter-than-average doc beats a longer one
+        // for the same term frequency.
+        let short = bm25_score(&tf1, 2.0, avg, &idf);
+        let long = bm25_score(&tf1, 50.0, avg, &idf);
+        assert!(short > long);
+
+        // A term with non-positive IDF (in every doc) contributes nothing.
+        let idf0 = BTreeMap::from([("t".to_string(), 0.0)]);
+        assert_eq!(bm25_score(&tf1, 10.0, avg, &idf0), 0.0);
+    }
+
+    #[test]
+    fn collect_doc_weights_title_and_summary_above_body() {
+        let path = Path::new("wiki/concepts/foo.md");
+        let toks = vec!["lancedb".to_string()];
+        let call = |content: &str| {
+            collect_doc(".", path, content, &toks, "lancedb", "lancedb", false)
+                .1
+                .expect("candidate")
+                .weighted_tf["lancedb"]
+        };
+
+        // Body-only occurrence → weight 1.
+        let body = call("---\ntitle: Foo\n---\n\n# Foo\n\nlancedb appears in the body.");
+        assert_eq!(body, 1.0);
+
+        // Same term in the `summary` frontmatter → effective weight 2
+        // (1 from the body scan of the frontmatter line + 1 summary boost).
+        let summary = call("---\nsummary: lancedb vector store\ntitle: Foo\n---\n\n# Foo\n\nbody text.");
+        assert_eq!(summary, 2.0);
+
+        // In the title it outweighs the summary (title boost is larger).
+        let title = call("---\ntitle: lancedb guide\n---\n\n# lancedb guide\n\nbody text.");
+        assert!(title > summary, "title weight {title} should exceed summary {summary}");
+    }
+
+    #[tokio::test]
+    async fn bm25_idf_favors_rarer_query_term() {
+        let root = tmp_project();
+        // Four pages share a common term; one also carries a rare term.
+        for i in 0..4 {
+            write_page(
+                &root,
+                &format!("wiki/concepts/common{i}.md"),
+                "---\ntitle: Common\n---\n\n# Common\n\nThis page is about kubernetes orchestration.",
+            );
+        }
+        write_page(
+            &root,
+            "wiki/concepts/rare.md",
+            "---\ntitle: Rare\n---\n\n# Rare\n\nkubernetes plus the rare term photosynthesis here.",
+        );
+
+        // "kubernetes" is in every doc (low IDF); "photosynthesis" in one (high
+        // IDF). The doc matching the rare term must rank first.
+        let out = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "kubernetes photosynthesis".into(),
+            20,
+            false,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.mode, "keyword");
+        assert!(out.results[0].path.ends_with("rare.md"));
+        // And it strictly outscores every common-only page.
+        assert!(out.results[1..].iter().all(|r| out.results[0].score > r.score));
+        let _ = fs::remove_dir_all(root);
     }
 }
