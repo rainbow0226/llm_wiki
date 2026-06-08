@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -51,6 +52,60 @@ pub struct ProjectSearchResponse {
     pub results: Vec<ProjectSearchResult>,
     pub token_hits: usize,
     pub vector_hits: usize,
+    // DEVWIKI (P4①): structured retrieval trace, populated only when the
+    // caller opts in (`with_trace`). Omitted from the response otherwise so
+    // existing clients/tests are unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<RetrievalTrace>,
+}
+
+// DEVWIKI (P4①): retrieval-path logging. A trace makes "why did this page
+// rank here" reconstructable — per-candidate keyword/vector scores and ranks,
+// plus the RRF score and final position. It is the instrument we read BEFORE
+// swapping score_file() for BM25 in P4③, so the change's effect is measurable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceCandidate {
+    /// File stem — the id vector results are keyed by.
+    pub page_id: String,
+    /// Project-relative path (e.g. `wiki/concept/foo.md`).
+    pub path: String,
+    /// Raw keyword score from `score_file` (None ⇒ vector-only candidate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyword_score: Option<f64>,
+    /// 1-based rank in the keyword-only ordering (None ⇒ no keyword hit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyword_rank: Option<usize>,
+    /// Cosine similarity from LanceDB (None ⇒ keyword-only candidate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_score: Option<f32>,
+    /// 1-based rank in the vector-only ordering (None ⇒ no vector hit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_rank: Option<usize>,
+    /// Final fused score (RRF in hybrid mode; raw keyword score otherwise).
+    pub rrf_score: f64,
+    /// 1-based position in the returned, truncated result list.
+    pub final_rank: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalTrace {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// "keyword" | "vector" | "hybrid" — mirrors the response mode.
+    pub mode: String,
+    /// Retrieval paths attempted this query, e.g. ["keyword","vector"].
+    pub paths_run: Vec<String>,
+    pub top_k: usize,
+    pub token_hits: usize,
+    pub vector_hits: usize,
+    pub candidates: Vec<TraceCandidate>,
+    /// Unix epoch milliseconds when the trace was built.
+    pub ts: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +135,9 @@ pub async fn search_project(
     embedding_config: Option<SearchEmbeddingConfig>,
     // DEVWIKI: optional bounded-context filter; None preserves upstream behavior
     bc: Option<String>,
+    // DEVWIKI (P4①): optional retrieval-trace switch + SDLC phase passthrough.
+    with_trace: Option<bool>,
+    phase: Option<String>,
 ) -> Result<ProjectSearchResponse, String> {
     run_guarded_async("search_project", async move {
         let query_embedding =
@@ -91,6 +149,8 @@ pub async fn search_project(
             include_content.unwrap_or(false),
             query_embedding,
             bc, // DEVWIKI: pass bc filter through
+            with_trace.unwrap_or(false),
+            phase,
         )
         .await
     })
@@ -138,10 +198,18 @@ pub async fn search_project_inner(
     query_embedding: Option<Vec<f32>>,
     // DEVWIKI: optional bounded-context filter; None preserves upstream behavior
     bc_filter: Option<String>,
+    // DEVWIKI (P4①): when true, attach a structured RetrievalTrace to the
+    // response. `phase` is recorded verbatim in the trace for forward-compat
+    // with P4③ SDLC-phase weighting; it does not affect ranking yet.
+    with_trace: bool,
+    phase: Option<String>,
 ) -> Result<ProjectSearchResponse, String> {
     if query.trim().is_empty() {
         return Err("query is required".to_string());
     }
+    // DEVWIKI (P4①): remember whether a vector path was attempted, before the
+    // embedding is moved into the search below.
+    let vector_attempted = query_embedding.as_ref().is_some_and(|e| !e.is_empty());
     // DEVWIKI: normalize bc filter once (case-insensitive, trimmed)
     let bc_filter = bc_filter
         .map(|s| s.trim().to_lowercase())
@@ -226,6 +294,19 @@ pub async fn search_project_inner(
         token_rank.insert(normalize_path(&result.path), idx + 1);
     }
 
+    // DEVWIKI (P4①): snapshot the raw keyword scores now — `apply_rrf_scores`
+    // overwrites `result.score` with the fused value, and vector-only results
+    // (materialized below) carry a placeholder 0.0 that must not look like a
+    // keyword score. At this point `results` holds keyword hits only.
+    let keyword_scores: BTreeMap<String, f64> = if with_trace {
+        results
+            .iter()
+            .map(|r| (normalize_path(&r.path), r.score))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+
     let mut vector_rank: BTreeMap<String, usize> = BTreeMap::new();
     let mut vector_score: BTreeMap<String, f32> = BTreeMap::new();
     let mut vector_hits = 0;
@@ -263,11 +344,28 @@ pub async fn search_project_inner(
                 .then_with(|| a.path.cmp(&b.path))
         });
         results.truncate(limit);
+        let trace = with_trace.then(|| {
+            build_retrieval_trace(
+                &results,
+                &token_rank,
+                &vector_rank,
+                &keyword_scores,
+                &query,
+                &bc_filter,
+                &phase,
+                "keyword",
+                vector_attempted,
+                limit,
+                token_rank.len(),
+                vector_hits,
+            )
+        });
         return Ok(ProjectSearchResponse {
             mode: "keyword".to_string(),
             token_hits: token_rank.len(),
             vector_hits,
             results,
+            trace,
         });
     }
 
@@ -281,11 +379,29 @@ pub async fn search_project_inner(
     });
     results.truncate(limit);
 
+    let mode = search_mode(token_rank.is_empty(), vector_hits).to_string();
+    let trace = with_trace.then(|| {
+        build_retrieval_trace(
+            &results,
+            &token_rank,
+            &vector_rank,
+            &keyword_scores,
+            &query,
+            &bc_filter,
+            &phase,
+            &mode,
+            vector_attempted,
+            limit,
+            token_rank.len(),
+            vector_hits,
+        )
+    });
     Ok(ProjectSearchResponse {
-        mode: search_mode(token_rank.is_empty(), vector_hits).to_string(),
+        mode,
         token_hits: token_rank.len(),
         vector_hits,
         results,
+        trace,
     })
 }
 
@@ -309,6 +425,71 @@ fn apply_rrf_scores(
             result.vector_score = Some(score);
         }
         result.score = rrf;
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// DEVWIKI (P4①): assemble a per-candidate retrieval trace from the final,
+// truncated result list and the rank/score lookups gathered during search.
+// `keyword_scores` holds the raw `score_file` scores captured *before*
+// `apply_rrf_scores` overwrote `result.score` with the fused RRF value.
+#[allow(clippy::too_many_arguments)]
+fn build_retrieval_trace(
+    final_results: &[ProjectSearchResult],
+    token_rank: &BTreeMap<String, usize>,
+    vector_rank: &BTreeMap<String, usize>,
+    keyword_scores: &BTreeMap<String, f64>,
+    query: &str,
+    bc: &Option<String>,
+    phase: &Option<String>,
+    mode: &str,
+    vector_attempted: bool,
+    top_k: usize,
+    token_hits: usize,
+    vector_hits: usize,
+) -> RetrievalTrace {
+    let mut paths_run = vec!["keyword".to_string()];
+    if vector_attempted {
+        paths_run.push("vector".to_string());
+    }
+    let candidates = final_results
+        .iter()
+        .enumerate()
+        .map(|(idx, r)| {
+            let np = normalize_path(&r.path);
+            let stem = file_stem(&r.path);
+            let keyword_rank = token_rank.get(&np).copied();
+            TraceCandidate {
+                page_id: stem.clone(),
+                path: r.path.clone(),
+                // Only report a keyword score when the page actually hit on
+                // keywords; vector-only candidates have a placeholder 0.0 score.
+                keyword_score: keyword_rank.and(keyword_scores.get(&np).copied()),
+                keyword_rank,
+                vector_score: r.vector_score,
+                vector_rank: vector_rank.get(&stem).copied(),
+                rrf_score: r.score,
+                final_rank: idx + 1,
+            }
+        })
+        .collect();
+    RetrievalTrace {
+        query: query.to_string(),
+        bc: bc.clone(),
+        phase: phase.clone(),
+        mode: mode.to_string(),
+        paths_run,
+        top_k,
+        token_hits,
+        vector_hits,
+        candidates,
+        ts: now_millis(),
     }
 }
 
@@ -1167,7 +1348,9 @@ mod tests {
             20,
             false,
             None,
-            None, // DEVWIKI: no bc filter in this test
+            None,  // DEVWIKI: no bc filter in this test
+            false, // DEVWIKI: no trace
+            None,  // DEVWIKI: no phase
         )
         .await
         .unwrap();
@@ -1194,7 +1377,9 @@ mod tests {
             20,
             false,
             None,
-            None, // DEVWIKI: no bc filter in this test
+            None,  // DEVWIKI: no bc filter in this test
+            false, // DEVWIKI: no trace
+            None,  // DEVWIKI: no phase
         )
         .await
         .unwrap();
@@ -1224,7 +1409,9 @@ mod tests {
             20,
             false,
             None,
-            None, // DEVWIKI: no bc filter in this test
+            None,  // DEVWIKI: no bc filter in this test
+            false, // DEVWIKI: no trace
+            None,  // DEVWIKI: no phase
         )
         .await
         .unwrap();
@@ -1268,6 +1455,8 @@ mod tests {
             false,
             None,
             None,
+            false,
+            None,
         )
         .await
         .unwrap();
@@ -1281,11 +1470,129 @@ mod tests {
             false,
             None,
             Some("Payment".into()), // case-insensitive
+            false,
+            None,
         )
         .await
         .unwrap();
         assert_eq!(filtered.results.len(), 1);
         assert!(filtered.results[0].path.ends_with("pay.md"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    // DEVWIKI (P4①): retrieval-trace tests.
+    #[tokio::test]
+    async fn keyword_trace_reconstructs_scores_and_ranks() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/concepts/attention.md",
+            "---\ntitle: Attention\n---\n\n# Attention\n\nbody about attention.",
+        );
+        write_page(
+            &root,
+            "wiki/concepts/random.md",
+            "---\ntitle: Random\n---\n\n# Random\n\nattention is mentioned briefly.",
+        );
+
+        // with_trace = false ⇒ no trace attached (backward-compatible default).
+        let without = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "attention".into(),
+            20,
+            false,
+            None,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(without.trace.is_none());
+
+        // with_trace = true ⇒ keyword-mode trace with per-candidate detail.
+        let out = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "attention".into(),
+            20,
+            false,
+            None,
+            None,
+            true,
+            Some("dev".into()),
+        )
+        .await
+        .unwrap();
+
+        let trace = out.trace.expect("trace requested");
+        assert_eq!(trace.mode, "keyword");
+        assert_eq!(trace.paths_run, vec!["keyword".to_string()]);
+        assert_eq!(trace.phase.as_deref(), Some("dev"));
+        assert_eq!(trace.candidates.len(), out.results.len());
+
+        // The filename-exact page ranks first and carries a keyword score but
+        // no vector score (vector path never ran).
+        let top = &trace.candidates[0];
+        assert_eq!(top.page_id, "attention");
+        assert_eq!(top.final_rank, 1);
+        assert_eq!(top.keyword_rank, Some(1));
+        assert!(top.keyword_score.unwrap() > 100.0);
+        assert_eq!(top.rrf_score, top.keyword_score.unwrap()); // no RRF in keyword mode
+        assert!(top.vector_score.is_none());
+        assert!(top.vector_rank.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_trace_gates_keyword_score_on_keyword_hit() {
+        // Simulate the hybrid end-state: `both` hit on keyword+vector,
+        // `vector-only` hit on vector alone (placeholder 0.0 keyword score).
+        let mut both = result("wiki/concepts/both.md");
+        both.score = 1.0 / 61.0 + 1.0 / 61.0; // RRF score after fusion
+        both.vector_score = Some(0.95);
+        let mut vector_only = result("wiki/concepts/vector-only.md");
+        vector_only.score = 1.0 / 62.0;
+        vector_only.vector_score = Some(0.8);
+        let final_results = vec![both, vector_only];
+
+        let token_rank = BTreeMap::from([("wiki/concepts/both.md".to_string(), 1)]);
+        let vector_rank =
+            BTreeMap::from([("both".to_string(), 1), ("vector-only".to_string(), 2)]);
+        // Raw keyword score snapshot — only `both` had a keyword hit.
+        let keyword_scores = BTreeMap::from([("wiki/concepts/both.md".to_string(), 207.0)]);
+
+        let trace = build_retrieval_trace(
+            &final_results,
+            &token_rank,
+            &vector_rank,
+            &keyword_scores,
+            "vector database",
+            &Some("payment".to_string()),
+            &None,
+            "hybrid",
+            true,
+            10,
+            1,
+            2,
+        );
+
+        assert_eq!(trace.paths_run, vec!["keyword".to_string(), "vector".to_string()]);
+        assert_eq!(trace.bc.as_deref(), Some("payment"));
+
+        let c0 = &trace.candidates[0];
+        assert_eq!(c0.page_id, "both");
+        assert_eq!(c0.keyword_rank, Some(1));
+        assert_eq!(c0.keyword_score, Some(207.0));
+        assert_eq!(c0.vector_rank, Some(1));
+        assert_eq!(c0.vector_score, Some(0.95));
+        assert_eq!(c0.final_rank, 1);
+
+        // Vector-only candidate: NO keyword score despite a 0.0 placeholder.
+        let c1 = &trace.candidates[1];
+        assert_eq!(c1.page_id, "vector-only");
+        assert_eq!(c1.keyword_rank, None);
+        assert_eq!(c1.keyword_score, None);
+        assert_eq!(c1.vector_rank, Some(2));
+        assert_eq!(c1.final_rank, 2);
     }
 }

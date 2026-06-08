@@ -1159,6 +1159,12 @@ struct SearchRequest {
     query_embedding: Option<Vec<f32>>,
     // DEVWIKI: optional bounded-context filter (e.g. {"bc": "payment"})
     bc: Option<String>,
+    // DEVWIKI (P4①): when true, attach a structured retrieval trace to the
+    // response and append it to wiki/_meta/retrieval-log.jsonl.
+    trace: Option<bool>,
+    // DEVWIKI (P4①): SDLC phase recorded in the trace (design/dev/test/ops);
+    // forward-compat passthrough — does not affect ranking until P4③.
+    phase: Option<String>,
 }
 
 fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
@@ -1176,6 +1182,8 @@ fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
     let top_k = req.top_k.unwrap_or(10).clamp(1, MAX_SEARCH_RESULTS);
     let query = req.query;
     let bc_filter = req.bc.clone(); // DEVWIKI: bounded-context filter
+    let with_trace = req.trace.unwrap_or(false); // DEVWIKI (P4①)
+    let phase = req.phase.clone(); // DEVWIKI (P4①)
     let query_embedding =
         match tauri::async_runtime::block_on(commands::search::resolve_query_embedding(
             &query,
@@ -1192,17 +1200,53 @@ fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
         req.include_content.unwrap_or(false),
         query_embedding,
         bc_filter, // DEVWIKI: bounded-context filter
+        with_trace, // DEVWIKI (P4①): retrieval trace
+        phase,      // DEVWIKI (P4①): SDLC phase passthrough
     )) {
-        Ok(search) => ok(json!({
-            "ok": true,
-            "projectId": project.id,
-            "mode": search.mode,
-            "note": "Search uses the shared backend retrieval service. When embeddingConfig is enabled, the API automatically includes LanceDB vector results; clients may also pass queryEmbedding explicitly.",
-            "tokenHits": search.token_hits,
-            "vectorHits": search.vector_hits,
-            "results": search.results,
-        })),
+        Ok(search) => {
+            // DEVWIKI (P4①): persist the trace to wiki/_meta/retrieval-log.jsonl
+            // (append, one JSON object per line) so the recall-eval harness can
+            // consume real queries offline. Best-effort: a log failure must not
+            // fail the search.
+            if let Some(ref trace) = search.trace {
+                append_retrieval_log(&project.path, trace);
+            }
+            ok(json!({
+                "ok": true,
+                "projectId": project.id,
+                "mode": search.mode,
+                "note": "Search uses the shared backend retrieval service. When embeddingConfig is enabled, the API automatically includes LanceDB vector results; clients may also pass queryEmbedding explicitly.",
+                "tokenHits": search.token_hits,
+                "vectorHits": search.vector_hits,
+                "results": search.results,
+                "trace": search.trace,
+            }))
+        }
         Err(e) => err(500, e),
+    }
+}
+
+// DEVWIKI (P4①): append one retrieval trace as a JSON line to
+// <project>/wiki/_meta/retrieval-log.jsonl. Lives under wiki/_meta/ alongside
+// bc-registry.yaml; the `.jsonl` extension keeps it out of the markdown search
+// walk. All failures are swallowed — logging is observability, never a
+// blocker for the query itself.
+fn append_retrieval_log(project_path: &str, trace: &commands::search::RetrievalTrace) {
+    use std::io::Write;
+    let meta_dir = std::path::Path::new(project_path).join("wiki").join("_meta");
+    if std::fs::create_dir_all(&meta_dir).is_err() {
+        return;
+    }
+    let Ok(mut line) = serde_json::to_string(trace) else {
+        return;
+    };
+    line.push('\n');
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(meta_dir.join("retrieval-log.jsonl"))
+    {
+        let _ = f.write_all(line.as_bytes());
     }
 }
 
