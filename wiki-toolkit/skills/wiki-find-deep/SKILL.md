@@ -18,9 +18,13 @@ Seed with hybrid search, then walk the knowledge graph to gather the neighborhoo
 synthesize. Where `/wiki-find` answers "what do we know about X", this answers "what is X
 connected to, and how". Budget ~30-60s.
 
-> P3 will add typed edges (`prerequisites`/`supersedes`/`related_decisions`) + an
-> `llm_wiki_graph_traverse` MCP tool. Until then, expansion uses the untyped wikilink/`related`
-> graph — still useful, just without edge semantics.
+> **P3 shipped typed edges + a traversal tool.** The graph now carries directed typed edges from
+> frontmatter — `prerequisites` (→ "prerequisite"), `supersedes`, `related_decisions` (→
+> "related-decision") — alongside untyped `link` (wikilink) edges, each on `edges[].relation`.
+> The fastest expansion path is the **`llm_wiki_graph_traverse`** MCP tool (BFS from a seed page,
+> `depth` 1-3, optional `edge_type` to follow one relation, e.g. `edge_type: "prerequisite"` to
+> pull a learning-order chain). `GET /graph?with_insights=true` also returns Louvain
+> `communities`, `surprisingConnections`, and `knowledgeGaps` to enrich the synthesis.
 
 ---
 
@@ -29,11 +33,16 @@ connected to, and how". Budget ~30-60s.
 1. **Seed search.** Run the hybrid search (`top_k: 5`, `include_content: true`, optional `bc`)
    exactly like `/wiki-find`. These are hop-0 pages. Keep their `summary` + `path` + slug
    (slug = file stem of the path; graph node ids are slugs).
-2. **Expand hop-1.** For each seed, collect neighbors two ways and union them:
+2. **Expand hop-1.** Fastest path: `llm_wiki_graph_traverse` with each seed slug (`depth: 1-2`,
+   optional `edge_type` to follow one relation — e.g. `"prerequisite"` for learning order). It
+   returns nodes grouped by hop + directed typed connections, so you can skip manual adjacency
+   walking. Otherwise, collect neighbors two ways and union them:
    - **In-page links**: parse `[[wikilinks]]` and the `related:` frontmatter list from the seed
      content (already have it from `include_content`).
-   - **Graph adjacency**: `GET /graph` → `edges:[{source,target}]`; take edges touching a seed
-     slug. (`nodes:[{id,label,nodeType,path,linkCount}]` gives each neighbor's path/type.)
+   - **Graph adjacency**: `GET /graph` → `edges:[{source,target,relation}]`; take edges touching a
+     seed slug. `relation` distinguishes `link` (wikilink) from typed `prerequisite`/`supersedes`/
+     `related-decision`. (`nodes:[{id,label,nodeType,path,linkCount,community}]` gives each
+     neighbor's path/type/cluster.)
    Drop neighbors already in the seed set.
 3. **Read hop-1 summaries.** Fetch each new neighbor's page (`GET /files/content?path=` or
    `llm_wiki_read_file`) and extract its `summary` + `bc` + `type`.
@@ -59,16 +68,17 @@ AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: Bearer $TOKEN")  # robust i
 jq -n --arg q "跨链桥安全" '{query:$q, topK:5, includeContent:true}' \
 | curl -sS -X POST "$BASE/projects/current/search" -H "Content-Type: application/json" "${AUTH[@]}" -d @-
 
-# adjacency for hop expansion (whole graph; filter to seed slugs client-side)
-curl -sS "$BASE/projects/current/graph?limit=1000" "${AUTH[@]}"
+# adjacency + insights for hop expansion (edges carry `relation`; insights add communities/gaps)
+curl -sS "$BASE/projects/current/graph?limit=1000&with_insights=true" "${AUTH[@]}"
 
 # read a specific neighbor page
 curl -sS "$BASE/projects/current/files/content?path=wiki/concepts/atomic-swap.md" "${AUTH[@]}"
 ```
 
-**MCP alternative**: `llm_wiki_search` (seeds), `llm_wiki_graph` (adjacency), `llm_wiki_read_file`
-(neighbor pages) — same data. Reminder: search backend is burst-sensitive → fan out **serially**,
-not in parallel.
+**MCP alternative**: `llm_wiki_search` (seeds), **`llm_wiki_graph_traverse`** (BFS hop expansion
+from a seed slug — `depth`, optional `edge_type`), `llm_wiki_graph` (full adjacency + insights),
+`llm_wiki_read_file` (neighbor pages) — same data. Reminder: search backend is burst-sensitive →
+fan out **serially**, not in parallel.
 
 **Errors**: identical to `/wiki-find` (401 token / connection refused). If `/graph` is empty,
 fall back to wikilink/`related` parsing only — the graph endpoint is just an adjacency cache.

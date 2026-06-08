@@ -588,6 +588,7 @@ mod tests {
             source: source.to_string(),
             target: target.to_string(),
             weight: 1.0,
+            relation: "link".to_string(),
         }
     }
 

@@ -1,14 +1,20 @@
 import type { ApiGraphNode } from "./api-client.js"
 
+type TraversalEdge = { source: string; target: string; relation?: string }
+
 // DEVWIKI (P3): breadth-first multi-hop traversal over the wiki graph. Edges
-// are treated as undirected (wikilinks are deduped to one entry per pair).
-// Returns the reached sub-graph grouped by hop distance, capped at maxNodes.
+// are treated as undirected for reachability (wikilinks are deduped to one
+// entry per pair); typed frontmatter edges (prerequisite/supersedes/
+// related-decision) keep their direction in the printed connections. Pass
+// `edgeType` to expand along one relation only (e.g. "prerequisite"). Returns
+// the reached sub-graph grouped by hop distance, capped at maxNodes.
 export function traverseGraph(
   nodes: ApiGraphNode[],
-  edges: Array<{ source: string; target: string }>,
+  edges: TraversalEdge[],
   seedQuery: string,
   depth: number,
   maxNodes: number,
+  edgeType?: string,
 ): string {
   const byId = new Map(nodes.map((n) => [n.id, n]))
 
@@ -21,10 +27,15 @@ export function traverseGraph(
     return `# Graph traversal\n\nNo page matched seed "${seedQuery}". Use the page id (file stem) or exact title.`
   }
 
-  // Undirected adjacency.
+  // Only traverse edges of the requested relation when a filter is given.
+  const traversable = edgeType
+    ? edges.filter((e) => (e.relation ?? "link") === edgeType)
+    : edges
+
+  // Undirected adjacency (for reachability).
   const adj = new Map<string, Set<string>>()
   for (const n of nodes) adj.set(n.id, new Set())
-  for (const e of edges) {
+  for (const e of traversable) {
     if (adj.has(e.source) && adj.has(e.target)) {
       adj.get(e.source)!.add(e.target)
       adj.get(e.target)!.add(e.source)
@@ -51,10 +62,13 @@ export function traverseGraph(
 
   const reached = [...hop.keys()]
   const reachedSet = new Set(reached)
-  const subEdges = edges.filter((e) => reachedSet.has(e.source) && reachedSet.has(e.target))
+  const subEdges = traversable.filter(
+    (e) => reachedSet.has(e.source) && reachedSet.has(e.target),
+  )
 
+  const scope = edgeType ? ` along "${edgeType}" edges` : ""
   const lines = [
-    `# Graph traversal from "${seed.label}"`,
+    `# Graph traversal from "${seed.label}"${scope}`,
     "",
     `Seed: ${seed.id} (${seed.type})`,
     `Depth: ${depth}   Reached: ${reached.length} nodes, ${subEdges.length} edges` +
@@ -77,8 +91,11 @@ export function traverseGraph(
   }
   if (subEdges.length > 0) {
     lines.push("## Connections")
-    for (const e of subEdges) lines.push(`- ${e.source} — ${e.target}`)
+    for (const e of subEdges) {
+      // Typed edges are directed (a → b [relation]); plain wikilinks are not.
+      const rel = e.relation && e.relation !== "link" ? e.relation : undefined
+      lines.push(rel ? `- ${e.source} → ${e.target} [${rel}]` : `- ${e.source} — ${e.target}`)
+    }
   }
   return lines.join("\n").trimEnd()
 }
-

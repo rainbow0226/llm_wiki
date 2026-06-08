@@ -55,3 +55,26 @@ test("unknown seed returns a helpful message", () => {
   const out = traverseGraph(NODES, EDGES, "nope", 2, 50)
   assert.match(out, /No page matched seed "nope"/)
 })
+
+test("edge_type filter expands along one relation only", () => {
+  // a —link— b, a —prerequisite→ p, p —prerequisite→ q
+  const nodes: ApiGraphNode[] = [
+    { id: "a", label: "A", type: "decision", linkCount: 1 },
+    { id: "b", label: "B", type: "concept", linkCount: 1 },
+    { id: "p", label: "P", type: "concept", linkCount: 1 },
+    { id: "q", label: "Q", type: "concept", linkCount: 1 },
+  ]
+  const edges = [
+    { source: "a", target: "b", relation: "link" },
+    { source: "a", target: "p", relation: "prerequisite" },
+    { source: "p", target: "q", relation: "prerequisite" },
+  ]
+  const out = traverseGraph(nodes, edges, "a", 2, 50, "prerequisite")
+  // Follows prerequisite chain a→p→q, ignores the link to b.
+  assert.match(out, /along "prerequisite" edges/)
+  assert.match(out, /\bP\b/)
+  assert.match(out, /\bQ\b/)
+  assert.doesNotMatch(out, /\bB \(concept/)
+  // Typed edges render directed with their relation label.
+  assert.match(out, /a → p \[prerequisite\]/)
+})

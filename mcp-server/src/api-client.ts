@@ -52,6 +52,9 @@ export interface ApiGraphEdge {
   source: string
   target: string
   weight?: number
+  // DEVWIKI (P3): "link" (wikilink) or a typed relation
+  // (prerequisite/supersedes/related-decision).
+  relation?: string
 }
 
 export type ApiReviewStatus = "unresolved" | "resolved" | "all"
@@ -336,5 +339,6 @@ function parseGraphEdge(value: unknown): ApiGraphEdge {
     source: String(obj.source ?? ""),
     target: String(obj.target ?? ""),
     weight: numberOrUndefined(obj.weight),
+    relation: typeof obj.relation === "string" ? obj.relation : undefined,
   }
 }

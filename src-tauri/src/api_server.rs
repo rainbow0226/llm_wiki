@@ -1275,6 +1275,10 @@ pub(crate) struct ApiGraphEdge {
     pub(crate) source: String,
     pub(crate) target: String,
     pub(crate) weight: f64,
+    // DEVWIKI (P3): edge semantics. "link" = body [[wikilink]] (undirected);
+    // "prerequisite"/"supersedes"/"related-decision" = directed typed edges
+    // parsed from frontmatter list fields.
+    pub(crate) relation: String,
 }
 
 fn handle_graph(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
@@ -1340,9 +1344,18 @@ fn handle_graph(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
     }
 }
 
+// DEVWIKI (P3): frontmatter list fields that become directed, typed graph edges.
+const SEMANTIC_EDGE_FIELDS: [(&str, &str); 3] = [
+    ("prerequisites", "prerequisite"),
+    ("supersedes", "supersedes"),
+    ("related_decisions", "related-decision"),
+];
+
 fn build_graph(project_path: &str) -> Result<(Vec<ApiGraphNode>, Vec<ApiGraphEdge>), String> {
     let wiki_root = Path::new(project_path).join("wiki");
     let mut raw: BTreeMap<String, (String, String, String, Vec<String>)> = BTreeMap::new();
+    // id → [(relation, raw target slugs)] parsed from frontmatter list fields.
+    let mut semantic: BTreeMap<String, Vec<(&'static str, Vec<String>)>> = BTreeMap::new();
     for entry in WalkDir::new(&wiki_root).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file()
             || entry.path().extension().and_then(|s| s.to_str()) != Some("md")
@@ -1367,6 +1380,16 @@ fn build_graph(project_path: &str) -> Result<(Vec<ApiGraphNode>, Vec<ApiGraphEdg
         let node_type = extract_type(&content);
         let path = relative_to_project(project_path, entry.path());
         let links = extract_wikilinks(&content);
+        let refs: Vec<(&'static str, Vec<String>)> = SEMANTIC_EDGE_FIELDS
+            .iter()
+            .filter_map(|&(field, relation)| {
+                let targets = frontmatter_list_field(&content, field);
+                (!targets.is_empty()).then_some((relation, targets))
+            })
+            .collect();
+        if !refs.is_empty() {
+            semantic.insert(id.clone(), refs);
+        }
         raw.insert(id, (title, node_type, path, links));
     }
     let ids: BTreeSet<String> = raw.keys().cloned().collect();
@@ -1393,7 +1416,30 @@ fn build_graph(project_path: &str) -> Result<(Vec<ApiGraphNode>, Vec<ApiGraphEdg
                     source: source.clone(),
                     target,
                     weight: 1.0,
+                    relation: "link".to_string(),
                 });
+            }
+        }
+    }
+    // DEVWIKI (P3): directed typed edges from frontmatter (deduped per triple).
+    let mut seen_semantic: BTreeSet<(String, String, &str)> = BTreeSet::new();
+    for (source, refs) in &semantic {
+        for (relation, targets) in refs {
+            for target_raw in targets {
+                let Some(target) = resolve_link(target_raw, &ids) else {
+                    continue;
+                };
+                if &target == source {
+                    continue;
+                }
+                if seen_semantic.insert((source.clone(), target.clone(), relation)) {
+                    edges.push(ApiGraphEdge {
+                        source: source.clone(),
+                        target,
+                        weight: 1.0,
+                        relation: relation.to_string(),
+                    });
+                }
             }
         }
     }
@@ -1423,6 +1469,64 @@ fn extract_type(content: &str) -> String {
         }
     }
     "other".to_string()
+}
+
+// DEVWIKI (P3): read a frontmatter array field as a list of bare slugs.
+// Handles the inline form `key: [a, b]` (what the ingest prompt emits) and the
+// YAML block form (`key:` then `  - a` lines). Strips quotes, `[[…]]`, a
+// leading `wiki/`, and a trailing `.md` so values resolve as page ids. Only the
+// leading `---`-delimited frontmatter block is inspected.
+fn frontmatter_list_field(content: &str, key: &str) -> Vec<String> {
+    if !content.starts_with("---") {
+        return Vec::new();
+    }
+    let mut lines = content.lines().skip(1).peekable();
+    let prefix = format!("{key}:");
+    let mut out = Vec::new();
+    let clean = |s: &str| -> Option<String> {
+        let v = s
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .trim_start_matches("[[")
+            .trim_end_matches("]]")
+            .trim()
+            .trim_start_matches("wiki/")
+            .trim_end_matches(".md")
+            .trim();
+        (!v.is_empty()).then(|| v.to_string())
+    };
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        let Some(rest) = trimmed.strip_prefix(&prefix) else {
+            continue;
+        };
+        let rest = rest.trim();
+        if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            // Inline form: key: [a, b, c]
+            out.extend(inner.split(',').filter_map(clean));
+        } else if rest.is_empty() {
+            // Block form: following `  - item` lines.
+            while let Some(next) = lines.peek() {
+                let t = next.trim();
+                if let Some(item) = t.strip_prefix("- ") {
+                    if let Some(v) = clean(item) {
+                        out.push(v);
+                    }
+                    lines.next();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            // Scalar value treated as a single-item list.
+            out.extend(clean(rest));
+        }
+        break;
+    }
+    out
 }
 
 fn extract_wikilinks(content: &str) -> Vec<String> {
@@ -1879,5 +1983,28 @@ mod tests {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         assert!(!mcp_enabled_missing);
+    }
+
+    // DEVWIKI (P3): frontmatter list parsing for semantic edges.
+    #[test]
+    fn frontmatter_list_field_parses_inline_block_and_strips_decoration() {
+        // Inline form (what the ingest prompt emits) with quotes + wikilinks.
+        let inline = "---\ntype: decision\nprerequisites: [auth-design, \"[[wiki/payment-flow.md]]\"]\n---\nbody";
+        assert_eq!(
+            frontmatter_list_field(inline, "prerequisites"),
+            vec!["auth-design".to_string(), "payment-flow".to_string()]
+        );
+
+        // YAML block form.
+        let block = "---\nsupersedes:\n  - old-policy\n  - legacy-retry\ntitle: X\n---\nbody";
+        assert_eq!(
+            frontmatter_list_field(block, "supersedes"),
+            vec!["old-policy".to_string(), "legacy-retry".to_string()]
+        );
+
+        // Absent field, empty list, and no-frontmatter all yield nothing.
+        assert!(frontmatter_list_field(inline, "supersedes").is_empty());
+        assert!(frontmatter_list_field("---\nprerequisites: []\n---\nx", "prerequisites").is_empty());
+        assert!(frontmatter_list_field("no frontmatter prerequisites: [a]", "prerequisites").is_empty());
     }
 }

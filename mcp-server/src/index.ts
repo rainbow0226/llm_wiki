@@ -130,6 +130,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           seed: { type: "string", description: "Seed page id (file stem) or title to start from." },
           depth: { type: "number", description: "Hop distance to expand (1-3). Defaults to 2." },
           max_nodes: { type: "number", description: "Maximum nodes to return. Defaults to 50." },
+          edge_type: { type: "string", description: "Expand along one relation only: 'link' (wikilink), 'prerequisite', 'supersedes', or 'related-decision'. Defaults to all edges." },
         },
         required: ["seed"],
         additionalProperties: false,
@@ -215,7 +216,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Fetch the full graph, then BFS client-side so a single endpoint
         // serves both visualization and traversal.
         const graph = await client.graph(projectId(args), { limit: 1000 })
-        return textResult(traverseGraph(graph.nodes, graph.edges, seed, depth, maxNodes))
+        return textResult(
+          traverseGraph(graph.nodes, graph.edges, seed, depth, maxNodes, optionalStringArg(args.edge_type)),
+        )
       }
       case "llm_wiki_rescan_sources": {
         await assertMcpEnabled()
