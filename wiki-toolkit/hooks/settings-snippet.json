@@ -1,0 +1,25 @@
+{
+  "_comment": "dev_wiki hooks. Merge this `hooks` block into <vault>/.claude/settings.json (or settings.local.json). Paths use $CLAUDE_PROJECT_DIR = the project/vault root. Install the scripts first: cp -r wiki-toolkit/hooks <vault>/.claude/ && chmod +x <vault>/.claude/hooks/*.sh",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
