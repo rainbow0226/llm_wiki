@@ -1,0 +1,25 @@
+{
+  "description": "dev_wiki retrieval regression set — EXAMPLE. Copy to your vault at wiki/_meta/eval/queries.json and replace with real queries + expected page_ids (file stems) from your own corpus.",
+  "k_values": [1, 3, 5, 10],
+  "queries": [
+    {
+      "id": "payment-retry",
+      "query": "支付失败重试机制",
+      "bc": "payment",
+      "phase": "dev",
+      "relevant": ["payment-retry-policy"],
+      "graded": { "payment-retry-policy": 3, "payment-timeout-handling": 1 }
+    },
+    {
+      "id": "rrf-fusion",
+      "query": "RRF 混合检索如何融合关键词和向量",
+      "relevant": ["hybrid-search-rrf", "reciprocal-rank-fusion"]
+    },
+    {
+      "id": "contextual-embed",
+      "query": "contextual prefix embedding 领域前缀",
+      "bc": "retrieval",
+      "relevant": ["contextual-prefix-embedding"]
+    }
+  ]
+}
