@@ -9,6 +9,14 @@ import {
   BookOpen,
   Calendar,
   Hash,
+  // DEVWIKI: icons for the enterprise page types (P0/P1).
+  Scale,
+  ListChecks,
+  Workflow,
+  GraduationCap,
+  Boxes,
+  GitCompare,
+  Layers,
 } from "lucide-react"
 
 export interface WikiTypeStyle {
@@ -82,6 +90,58 @@ export const WIKI_TYPE_STYLES: Record<string, WikiTypeStyle> = {
     icon: BookOpen,
     chipClass: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300",
     dotClass: "bg-indigo-500",
+  },
+  // ── DEVWIKI: enterprise + remaining native page types ──────────────────
+  // These were falling back to the generic "Page" chip; give each a
+  // distinct icon + colour (colours chosen to not collide with the above).
+  decision: {
+    label: "Decision",
+    icon: Scale, // 取舍/天平 — a decision record / ADR
+    chipClass: "bg-orange-500/15 text-orange-700 dark:text-orange-300",
+    dotClass: "bg-orange-500",
+  },
+  playbook: {
+    label: "Playbook",
+    icon: ListChecks, // actionable step checklist
+    chipClass: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
+    dotClass: "bg-sky-500",
+  },
+  solution: {
+    label: "Solution",
+    icon: Workflow, // cross-domain solution hub
+    chipClass: "bg-violet-500/15 text-violet-700 dark:text-violet-300",
+    dotClass: "bg-violet-500",
+  },
+  learning: {
+    label: "Learning",
+    icon: GraduationCap, // experience capture
+    chipClass: "bg-lime-500/15 text-lime-700 dark:text-lime-300",
+    dotClass: "bg-lime-500",
+  },
+  "bc-readme": {
+    label: "Meta",
+    icon: Boxes, // bounded-context / knowledge-domain overview
+    chipClass: "bg-fuchsia-500/15 text-fuchsia-700 dark:text-fuchsia-300",
+    dotClass: "bg-fuchsia-500",
+  },
+  // Alias: some pages may carry type: meta instead of bc-readme.
+  meta: {
+    label: "Meta",
+    icon: Boxes,
+    chipClass: "bg-fuchsia-500/15 text-fuchsia-700 dark:text-fuchsia-300",
+    dotClass: "bg-fuchsia-500",
+  },
+  comparison: {
+    label: "Comparison",
+    icon: GitCompare,
+    chipClass: "bg-pink-500/15 text-pink-700 dark:text-pink-300",
+    dotClass: "bg-pink-500",
+  },
+  synthesis: {
+    label: "Synthesis",
+    icon: Layers,
+    chipClass: "bg-yellow-500/15 text-yellow-700 dark:text-yellow-300",
+    dotClass: "bg-yellow-500",
   },
 }
 
