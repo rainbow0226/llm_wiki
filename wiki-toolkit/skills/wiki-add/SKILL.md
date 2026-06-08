@@ -81,6 +81,7 @@ If `bc-registry.yaml` is missing, STOP and report it — do not invent a `bc`.
 ```bash
 BASE="http://127.0.0.1:19828/api/v1"
 TOKEN="${LLM_WIKI_API_TOKEN:-}"          # set in shell, or enable allowUnauthenticated in Settings
+AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: Bearer $TOKEN")  # robust in bash AND zsh
 REL="wiki/decisions/my-slug.md"
 PAGE="$(mktemp)"; cat > "$PAGE" <<'MD'
 ---
@@ -104,8 +105,7 @@ MD
 jq -n --arg path "$REL" --rawfile content "$PAGE" \
   '{path:$path, content:$content, overwrite:false}' \
 | curl -sS -X POST "$BASE/projects/current/sources" \
-    -H "Content-Type: application/json" \
-    ${TOKEN:+-H "Authorization: Bearer $TOKEN"} \
+    -H "Content-Type: application/json" "${AUTH[@]}" \
     -d @-
 rm -f "$PAGE"
 ```

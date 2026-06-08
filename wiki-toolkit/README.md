@@ -12,9 +12,11 @@ wiki-toolkit/
 │   ├── bc-registry.yaml      bounded context 注册表模板
 │   └── scope-vocabulary.yaml 受控词表模板
 └── skills/               Claude Code skill 的权威副本（仓库内 .claude/ 被 gitignore）
-    ├── kb-lint/SKILL.md       知识库巡检 lint
-    ├── wiki-add/SKILL.md      写一页成品知识进 wiki（POST /sources 写入通道）
-    └── wiki-distill/SKILL.md  会话/调研 → learning 页（同写入通道）
+    ├── kb-lint/SKILL.md         知识库巡检 lint
+    ├── wiki-add/SKILL.md        写一页成品知识进 wiki（POST /sources 写入通道）
+    ├── wiki-distill/SKILL.md    会话/调研 → learning 页（同写入通道）
+    ├── wiki-find/SKILL.md       快速单跳召回，summary 直拼（~5s）
+    └── wiki-find-deep/SKILL.md  多跳图谱展开召回，按 bc 聚类（~30-60s）
 ```
 
 > 命名约定：知识库 skill 统一 `wiki-*` 前缀（写入 `wiki-add`/`wiki-distill`，检索 `wiki-find`/`wiki-find-deep`）。
@@ -26,11 +28,13 @@ wiki-toolkit/
 消费端按需安装到工作目录的 `.claude/skills/`：
 
 ```
-cp -r wiki-toolkit/skills/{kb-lint,wiki-add,wiki-distill} <work-dir>/.claude/skills/
+cp -r wiki-toolkit/skills/{kb-lint,wiki-add,wiki-distill,wiki-find,wiki-find-deep} <work-dir>/.claude/skills/
 ```
 
-`wiki-add`/`wiki-distill` 走 HTTP 写入通道（`POST /api/v1/projects/{id}/sources`），
-鉴权用环境变量 `LLM_WIKI_API_TOKEN`（或 Settings → API Server 里允许无 token / 配 token）。
+四个 `wiki-*` skill 走 HTTP API（写入 `POST /sources`，检索 `POST /search` + `GET /graph`），
+鉴权用环境变量 `LLM_WIKI_API_TOKEN`（或 Settings → API Server 里允许无 token / 配 token）；
+若配了 llm_wiki MCP server，检索可改用 `llm_wiki_search`/`llm_wiki_graph`/`llm_wiki_read_file`，数据等价。
+curl 鉴权统一用 `AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: Bearer $TOKEN")` 模式（bash/zsh 均稳）。
 
 ## 下发到消费者 vault
 
