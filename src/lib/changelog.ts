@@ -26,6 +26,38 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.4.22",
+    date: "2026-06-08",
+    highlights: {
+      en: [
+        "Improved MinerU PDF previews by extracting images from MinerU result archives and rewriting them into Markdown image links.",
+        "Converted MinerU HTML tables inside Markdown output into Markdown tables for cleaner preview and ingest.",
+        "Hardened MinerU image handling for spaces, parentheses, path traversal, duplicate names, and partial image-save failures.",
+      ],
+      zh: [
+        "改进 MinerU PDF 预览：从 MinerU 结果压缩包提取图片，并重写为 Markdown 图片引用。",
+        "将 MinerU Markdown 输出中的 HTML 表格转换为 Markdown 表格，让预览和摄取更干净。",
+        "强化 MinerU 图片处理，覆盖空格、括号、路径穿越、重名图片和图片保存部分失败等边界。",
+      ],
+    },
+  },
+  {
+    version: "0.4.21",
+    date: "2026-06-07",
+    highlights: {
+      en: [
+        "Improved chat image support with safer local image handling, MiniMax M3 provider compatibility, and GLM vision model compatibility.",
+        "Improved MinerU PDF parsing, local CLI provider resolution, API/MCP settings, and source/image ingestion reliability.",
+        "Closed a batch of fixed GitHub issues covering source monitoring, scrolling, long-document ingest, editing, and provider compatibility.",
+      ],
+      zh: [
+        "改进 AI 对话图片支持，增强本地图片处理安全性，并扩展 MiniMax M3 Provider 与 GLM 多模态模型兼容。",
+        "优化 MinerU PDF 解析、本地 CLI Provider 解析、API/MCP 设置，以及资料与图片摄取稳定性。",
+        "集中处理并关闭一批已修复的 GitHub issue，覆盖资料监控、滚动、长文档摄取、编辑保存和 Provider 兼容。",
+      ],
+    },
+  },
+  {
     version: "0.4.20",
     date: "2026-06-04",
     highlights: {
