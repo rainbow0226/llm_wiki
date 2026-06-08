@@ -1,6 +1,7 @@
 mod api_server;
 mod clip_server;
 mod commands;
+mod graph_insights;
 mod panic_guard;
 mod proxy;
 mod tray;

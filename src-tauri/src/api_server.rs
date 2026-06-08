@@ -1258,20 +1258,23 @@ fn load_embedding_config(app: &AppHandle) -> Option<commands::search::SearchEmbe
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ApiGraphNode {
-    id: String,
-    label: String,
-    node_type: String,
-    path: String,
-    link_count: usize,
+pub(crate) struct ApiGraphNode {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) node_type: String,
+    pub(crate) path: String,
+    pub(crate) link_count: usize,
+    // DEVWIKI (P3): Louvain community id, attached only when ?with_insights=true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) community: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ApiGraphEdge {
-    source: String,
-    target: String,
-    weight: f64,
+pub(crate) struct ApiGraphEdge {
+    pub(crate) source: String,
+    pub(crate) target: String,
+    pub(crate) weight: f64,
 }
 
 fn handle_graph(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
@@ -1287,9 +1290,20 @@ fn handle_graph(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(200)
         .clamp(1, 1000);
+    // DEVWIKI (P3): ?with_insights=true attaches Louvain communities, surprising
+    // connections, and knowledge gaps (computed over the whole graph).
+    let with_insights = params
+        .get("with_insights")
+        .map(|s| s == "true" || s == "1")
+        .unwrap_or(false);
 
     match build_graph(&project.path) {
         Ok((mut nodes, edges)) => {
+            // Insights describe the full wiki, so compute them before the
+            // q/nodeType/limit view filtering below.
+            let insights = with_insights
+                .then(|| crate::graph_insights::compute_insights(&nodes, &edges));
+
             if let Some(ref q) = q {
                 nodes.retain(|n| {
                     n.id.to_lowercase().contains(q) || n.label.to_lowercase().contains(q)
@@ -1299,12 +1313,28 @@ fn handle_graph(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
                 nodes.retain(|n| n.node_type == *node_type);
             }
             nodes.truncate(limit);
+
+            // Stamp each surviving node with its community id.
+            if let Some(ref insights) = insights {
+                for node in nodes.iter_mut() {
+                    node.community = insights.node_communities.get(&node.id).copied();
+                }
+            }
+
             let ids: BTreeSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
             let edges: Vec<ApiGraphEdge> = edges
                 .into_iter()
                 .filter(|e| ids.contains(&e.source) && ids.contains(&e.target))
                 .collect();
-            ok(json!({ "ok": true, "projectId": project.id, "nodes": nodes, "edges": edges }))
+            let mut body = json!({ "ok": true, "projectId": project.id, "nodes": nodes, "edges": edges });
+            if let Some(insights) = insights {
+                body["insights"] = json!({
+                    "communities": insights.communities,
+                    "surprisingConnections": insights.surprising_connections,
+                    "knowledgeGaps": insights.knowledge_gaps,
+                });
+            }
+            ok(body)
         }
         Err(e) => err(500, e),
     }
@@ -1376,6 +1406,7 @@ fn build_graph(project_path: &str) -> Result<(Vec<ApiGraphNode>, Vec<ApiGraphEdg
             label,
             node_type,
             path,
+            community: None,
         })
         .collect();
     Ok((nodes, edges))
