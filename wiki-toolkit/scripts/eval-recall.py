@@ -153,6 +153,23 @@ def ranked_from_log(query: dict, log_lines: List[dict]) -> List[str]:
     return [c["pageId"] for c in cands if "pageId" in c]
 
 
+def _ranked_from_trace_body(body: dict, qid: str) -> List[str]:
+    """Extract the ranked page_ids from a /search response body.
+
+    A *present* trace with zero candidates is a legitimate empty result.
+    An *absent* or null trace means the target build did not honor
+    `trace:true` — that's a misconfiguration, not a 0-score query, so we
+    fail loud rather than let the gate report a phantom regression."""
+    if body.get("trace") is None:
+        raise SystemExit(
+            f"eval-recall: query {qid!r} got a response with no trace — the "
+            "target build does not honor trace:true, so --api cannot evaluate "
+            "it (every query would score 0 and the gate would cry regression).")
+    cands = sorted(body["trace"].get("candidates", []),
+                   key=lambda c: c.get("finalRank", 1 << 30))
+    return [c["pageId"] for c in cands if "pageId" in c]
+
+
 def ranked_from_api(query: dict, base_url: str, project: str,
                     token: Optional[str], top_k: int) -> List[str]:
     import urllib.request
@@ -168,12 +185,14 @@ def ranked_from_api(query: dict, base_url: str, project: str,
     req.add_header("Content-Type", "application/json")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    # --api targets an explicit base_url (usually localhost). Bypass any
+    # HTTP(S)_PROXY in the environment — otherwise a proxied shell routes the
+    # localhost request through the proxy and gets URLError/502, the same trap
+    # the wiki-* skills hit and fixed with `curl --noproxy '*'`.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=30) as resp:
         body = json.loads(resp.read().decode("utf-8"))
-    trace = body.get("trace") or {}
-    cands = sorted(trace.get("candidates", []),
-                   key=lambda c: c.get("finalRank", 1 << 30))
-    return [c["pageId"] for c in cands if "pageId" in c]
+    return _ranked_from_trace_body(body, query.get("id", query.get("query", "?")))
 
 
 # --------------------------------------------------------------------------
@@ -268,6 +287,20 @@ def selftest() -> int:
     ]
     assert ranked_from_log({"query": "q", "bc": "pay"}, log_bc) == ["p"]
 
+    # API trace parsing: a present-but-empty trace is a legit empty result;
+    # an absent/null trace is a misconfig → loud failure, not a 0-score query.
+    assert _ranked_from_trace_body(
+        {"trace": {"candidates": [
+            {"pageId": "b", "finalRank": 2}, {"pageId": "a", "finalRank": 1}]}},
+        "q") == ["a", "b"]
+    assert _ranked_from_trace_body({"trace": {"candidates": []}}, "q") == []
+    for bad in ({}, {"trace": None}):
+        try:
+            _ranked_from_trace_body(bad, "q")
+            assert False, "expected SystemExit on missing/null trace"
+        except SystemExit:
+            pass
+
     # End-to-end on a tiny set via the results source.
     qset = {"k_values": [1, 3], "queries": [
         {"id": "q1", "query": "q1", "relevant": ["a"]},
@@ -329,6 +362,14 @@ def main(argv: List[str]) -> int:
 
     with open(args.queries, encoding="utf-8") as f:
         query_set = json.load(f)
+    # An empty/missing query list must be a hard error, not a silent pass:
+    # aggregate({}) → no metrics → compare() finds no regressions → exit 0,
+    # i.e. a green gate that evaluated nothing and would wave a real drop through.
+    queries = query_set.get("queries")
+    if not isinstance(queries, list) or not queries:
+        print("eval-recall: query set has no queries — nothing to evaluate "
+              "(refusing to report a green gate)", file=sys.stderr)
+        return 1
     source = build_source(args)
     report = run_eval(query_set, source)
 
