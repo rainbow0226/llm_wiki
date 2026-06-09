@@ -84,6 +84,22 @@ test("graph parses nodeType from API graph nodes", async () => {
   assert.equal(graph.edges[0]?.weight, 0.75)
 })
 
+test("graph requests with_insights when withInsights is set", async () => {
+  const calls: string[] = []
+  const fetchImpl = async (url: string | URL | Request): Promise<Response> => {
+    calls.push(String(url))
+    return new Response(JSON.stringify({ ok: true, nodes: [], edges: [] }), { status: 200 })
+  }
+
+  const client = new LlmWikiApiClient({ fetchImpl })
+  await client.graph("current", { limit: 1000, withInsights: true })
+
+  assert.match(calls[0] ?? "", /[?&]with_insights=true(&|$)/)
+  // Without the flag the param is absent (community stays uncomputed).
+  await client.graph("current", { limit: 1000 })
+  assert.ok(!(calls[1] ?? "").includes("with_insights"))
+})
+
 test("files exposes truncated flag", async () => {
   const fetchImpl = async (): Promise<Response> => (
     new Response(JSON.stringify({

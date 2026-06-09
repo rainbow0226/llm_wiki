@@ -202,11 +202,13 @@ export class LlmWikiApiClient {
     }
   }
 
-  async graph(projectId = "current", options: { q?: string; nodeType?: string; limit?: number } = {}): Promise<{ nodes: ApiGraphNode[]; edges: ApiGraphEdge[] }> {
+  async graph(projectId = "current", options: { q?: string; nodeType?: string; limit?: number; withInsights?: boolean } = {}): Promise<{ nodes: ApiGraphNode[]; edges: ApiGraphEdge[] }> {
     const params = new URLSearchParams()
     if (options.q) params.set("q", options.q)
     if (options.nodeType) params.set("nodeType", options.nodeType)
     if (options.limit !== undefined) params.set("limit", String(options.limit))
+    // Louvain community ids are only computed server-side when requested.
+    if (options.withInsights) params.set("with_insights", "true")
     const suffix = params.toString() ? `?${params.toString()}` : ""
     const json = await this.request(`/projects/${encodeURIComponent(projectId)}/graph${suffix}`)
     return {

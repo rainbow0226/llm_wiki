@@ -217,8 +217,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const depth = Math.min(Math.max(numberArg(args.depth) ?? 2, 1), 3)
         const maxNodes = Math.min(Math.max(numberArg(args.max_nodes) ?? 50, 1), 200)
         // Fetch the full graph, then BFS client-side so a single endpoint
-        // serves both visualization and traversal.
-        const graph = await client.graph(projectId(args), { limit: 1000 })
+        // serves both visualization and traversal. withInsights so each node
+        // carries its Louvain community, which traverseGraph annotates.
+        const graph = await client.graph(projectId(args), { limit: 1000, withInsights: true })
         return textResult(
           traverseGraph(graph.nodes, graph.edges, seed, depth, maxNodes, optionalStringArg(args.edge_type)),
         )

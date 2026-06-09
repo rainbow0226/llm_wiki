@@ -1377,7 +1377,7 @@ fn build_graph(project_path: &str) -> Result<(Vec<ApiGraphNode>, Vec<ApiGraphEdg
         }
         let title =
             commands::search::extract_title(&content, entry.file_name().to_string_lossy().as_ref());
-        let node_type = extract_type(&content);
+        let node_type = commands::search::extract_type(&content);
         let path = relative_to_project(project_path, entry.path());
         let links = extract_wikilinks(&content);
         let refs: Vec<(&'static str, Vec<String>)> = SEMANTIC_EDGE_FIELDS
@@ -1456,19 +1456,6 @@ fn build_graph(project_path: &str) -> Result<(Vec<ApiGraphNode>, Vec<ApiGraphEdg
         })
         .collect();
     Ok((nodes, edges))
-}
-
-fn extract_type(content: &str) -> String {
-    for line in content.lines() {
-        if let Some(value) = line.trim().strip_prefix("type:") {
-            return value
-                .trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_lowercase();
-        }
-    }
-    "other".to_string()
 }
 
 // DEVWIKI (P3): read a frontmatter array field as a list of bare slugs.

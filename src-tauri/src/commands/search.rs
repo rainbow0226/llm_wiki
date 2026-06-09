@@ -832,9 +832,7 @@ fn collect_doc(
         title_has_phrase,
         title_token_hit,
         content_phrase_occ,
-        node_type: frontmatter_field(content, "type")
-            .map(|t| t.to_lowercase())
-            .unwrap_or_default(),
+        node_type: extract_type(content),
     };
     (doc_len, Some(candidate))
 }
@@ -979,6 +977,17 @@ pub fn frontmatter_field(content: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Canonical page-type extractor: the frontmatter `type` lowercased, or
+/// "other" when absent. The single source of truth used by BOTH keyword
+/// ranking (SDLC phase weighting) and the graph layer, so a page is typed
+/// identically everywhere instead of via two extractors with different scope
+/// and defaults.
+pub fn extract_type(content: &str) -> String {
+    frontmatter_field(content, "type")
+        .map(|t| t.to_lowercase())
+        .unwrap_or_else(|| "other".to_string())
 }
 
 pub fn extract_title(content: &str, file_name: &str) -> String {
