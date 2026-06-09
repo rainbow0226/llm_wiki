@@ -116,11 +116,17 @@ def aggregate(per_query: List[Dict[str, float]]) -> Dict[str, float]:
 # --------------------------------------------------------------------------
 
 def gains_for(query: dict) -> Dict[str, float]:
-    """Graded gains if present, else gain 1 for every binary-relevant page."""
+    """nDCG gains: every binary-relevant page gets gain 1, then `graded` refines
+    those (and may add extra graded pages). Merging — rather than letting
+    `graded` REPLACE `relevant` — ensures a relevant page the author forgot to
+    grade still contributes to nDCG, so nDCG can't silently disagree with the
+    Hit@k/MRR that score off the same `relevant` set."""
+    gains: Dict[str, float] = {pid: 1.0 for pid in query.get("relevant", [])}
     graded = query.get("graded")
-    if isinstance(graded, dict) and graded:
-        return {pid: float(g) for pid, g in graded.items()}
-    return {pid: 1.0 for pid in query.get("relevant", [])}
+    if isinstance(graded, dict):
+        for pid, g in graded.items():
+            gains[pid] = float(g)
+    return gains
 
 
 def ranked_from_results(query: dict, results: dict) -> List[str]:
@@ -172,6 +178,7 @@ def _ranked_from_trace_body(body: dict, qid: str) -> List[str]:
 
 def ranked_from_api(query: dict, base_url: str, project: str,
                     token: Optional[str], top_k: int) -> List[str]:
+    import urllib.error
     import urllib.request
 
     payload = {"query": query["query"], "topK": top_k, "trace": True}
@@ -190,9 +197,20 @@ def ranked_from_api(query: dict, base_url: str, project: str,
     # localhost request through the proxy and gets URLError/502, the same trap
     # the wiki-* skills hit and fixed with `curl --noproxy '*'`.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=30) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    return _ranked_from_trace_body(body, query.get("id", query.get("query", "?")))
+    qid = query.get("id", query.get("query", "?"))
+    # Turn transport/parse failures into a clean exit-1 message rather than a
+    # raw traceback (an operational error, not a regression).
+    try:
+        with opener.open(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"eval-recall: query {qid!r} → API HTTP {e.code} at {url}: {e.reason}")
+    except urllib.error.URLError as e:
+        raise SystemExit(f"eval-recall: query {qid!r} → cannot reach API at {url}: {e.reason} "
+                         "(is dev_wiki running? is the proxy bypassed?)")
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"eval-recall: query {qid!r} → API returned non-JSON: {e}")
+    return _ranked_from_trace_body(body, qid)
 
 
 # --------------------------------------------------------------------------
@@ -201,12 +219,26 @@ def ranked_from_api(query: dict, base_url: str, project: str,
 
 def run_eval(query_set: dict, source) -> dict:
     k_values = query_set.get("k_values") or DEFAULT_K
+    kmax = max(k_values)
     per_query = []
+    shorted = []  # queries whose ranked list is shorter than kmax
     for q in query_set["queries"]:
-        ranked = source(q, max(k_values))
+        ranked = source(q, kmax)
         relevant = set(q.get("relevant", []))
         scores = score_query(ranked, relevant, gains_for(q), k_values)
         per_query.append({"id": q["id"], **scores, "n_ranked": len(ranked)})
+        if len(ranked) < kmax:
+            shorted.append((q["id"], len(ranked)))
+    # No silent caps: a ranked list shorter than kmax (e.g. a --log/--results
+    # capture truncated to a smaller top_k than the eval's k) scores Hit@k/nDCG@k
+    # over a too-short list and understates recall. Surface it rather than let it
+    # read as full coverage.
+    if shorted:
+        shown = ", ".join(f"{qid}({n})" for qid, n in shorted[:8])
+        more = "" if len(shorted) <= 8 else f" +{len(shorted) - 8} more"
+        print(f"eval-recall: WARNING {len(shorted)} query(ies) returned fewer than "
+              f"k={kmax} results; metrics at large k are computed over a short list "
+              f"and may understate recall: {shown}{more}", file=sys.stderr)
     metric_rows = [{kk: vv for kk, vv in q.items() if kk not in ("id", "n_ranked")}
                    for q in per_query]
     return {
@@ -266,6 +298,10 @@ def selftest() -> int:
     assert gains_for(q) == {"a": 1.0, "c": 1.0}
     q2 = {"relevant": ["a"], "graded": {"a": 2, "b": 1}}
     assert gains_for(q2) == {"a": 2.0, "b": 1.0}
+    # graded REFINES relevant, it doesn't replace it: a relevant page the author
+    # forgot to grade keeps gain 1 (so nDCG still credits it, matching Hit@k).
+    q3 = {"relevant": ["a", "c"], "graded": {"a": 3}}
+    assert gains_for(q3) == {"a": 3.0, "c": 1.0}, gains_for(q3)
 
     # Aggregate macro-averages across queries.
     agg = aggregate([{"hit@1": 1.0, "mrr": 1.0}, {"hit@1": 0.0, "mrr": 0.5}])
@@ -306,7 +342,7 @@ def selftest() -> int:
         {"id": "q1", "query": "q1", "relevant": ["a"]},
         {"id": "q2", "query": "q2", "relevant": ["z"]},
     ]}
-    results = {"q1": ["a", "b"], "q2": ["b", "c"]}
+    results = {"q1": ["a", "b", "x"], "q2": ["b", "c", "y"]}  # ≥ max(k) so no short-list warning
     rep = run_eval(qset, lambda q, k: ranked_from_results(q, results))
     assert rep["metrics"]["hit@1"] == 0.5   # q1 hits, q2 misses
     assert rep["metrics"]["mrr"] == 0.5     # q1 rr=1, q2 rr=0
@@ -326,14 +362,42 @@ def selftest() -> int:
 # CLI.
 # --------------------------------------------------------------------------
 
+def load_json(path: str, what: str):
+    """Load a JSON file, turning IO/parse failures into a clean exit-1 message
+    (an operational error) instead of a raw traceback — kept distinct from the
+    regression exit 2 a gate wrapper keys on."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise SystemExit(f"eval-recall: {what} not found: {path!r}")
+    except (OSError, json.JSONDecodeError) as e:
+        raise SystemExit(f"eval-recall: cannot read {what} {path!r}: {e}")
+
+
+def load_jsonl(path: str, what: str) -> List[dict]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln for ln in f if ln.strip()]
+    except FileNotFoundError:
+        raise SystemExit(f"eval-recall: {what} not found: {path!r}")
+    except OSError as e:
+        raise SystemExit(f"eval-recall: cannot read {what} {path!r}: {e}")
+    out: List[dict] = []
+    for i, ln in enumerate(lines, 1):
+        try:
+            out.append(json.loads(ln))
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"eval-recall: {what} {path!r} line {i} is not valid JSON: {e}")
+    return out
+
+
 def build_source(args):
     if args.results:
-        with open(args.results, encoding="utf-8") as f:
-            results = json.load(f)
+        results = load_json(args.results, "--results file")
         return lambda q, k: ranked_from_results(q, results)
     if args.log:
-        with open(args.log, encoding="utf-8") as f:
-            log_lines = [json.loads(line) for line in f if line.strip()]
+        log_lines = load_jsonl(args.log, "--log file")
         return lambda q, k: ranked_from_log(q, log_lines)
     if args.api:
         token = args.token or os.environ.get("LLM_WIKI_API_TOKEN")
@@ -360,8 +424,7 @@ def main(argv: List[str]) -> int:
     if not args.queries:
         ap.error("--queries is required (unless --selftest)")
 
-    with open(args.queries, encoding="utf-8") as f:
-        query_set = json.load(f)
+    query_set = load_json(args.queries, "--queries file")
     # An empty/missing query list must be a hard error, not a silent pass:
     # aggregate({}) → no metrics → compare() finds no regressions → exit 0,
     # i.e. a green gate that evaluated nothing and would wave a real drop through.
@@ -380,8 +443,7 @@ def main(argv: List[str]) -> int:
         print(f"eval-recall: wrote report → {args.out}", file=sys.stderr)
 
     if args.baseline:
-        with open(args.baseline, encoding="utf-8") as f:
-            baseline = json.load(f)
+        baseline = load_json(args.baseline, "--baseline file")
         regs = compare(baseline, report, args.tolerance)
         if regs:
             print("eval-recall: REGRESSION vs baseline:", file=sys.stderr)
