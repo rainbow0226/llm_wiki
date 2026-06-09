@@ -73,8 +73,17 @@ pub fn compute_insights(nodes: &[ApiGraphNode], edges: &[ApiGraphEdge]) -> Graph
         .map(|(i, n)| (n.id.as_str(), i))
         .collect();
 
-    // Symmetric weighted adjacency (each undirected edge in both endpoints).
-    let mut adjacency: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nodes.len()];
+    // Collapse the edge MULTIgraph to a canonical simple undirected weighted
+    // graph. A pair of pages may carry both a wikilink "link" edge and one or
+    // more typed (directed) frontmatter edges; for insight math only their
+    // connectivity matters, so we dedup to one weighted pair per unordered
+    // endpoint set and derive node degree from THAT. One fix for three
+    // symptoms of the same root cause: a pair is coupled once in Louvain (not
+    // double-weighted), a surprising pair fills one result slot (not two
+    // identical ones), and a page reachable only through typed edges still
+    // counts as connected (not falsely isolated the way the wikilink-only
+    // `link_count` field would report it).
+    let mut pair_weight: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     for e in edges {
         let (Some(&s), Some(&t)) = (index.get(e.source.as_str()), index.get(e.target.as_str()))
         else {
@@ -83,13 +92,28 @@ pub fn compute_insights(nodes: &[ApiGraphNode], edges: &[ApiGraphEdge]) -> Graph
         if s == t {
             continue;
         }
+        let key = if s < t { (s, t) } else { (t, s) };
         let w = if e.weight > 0.0 { e.weight } else { 1.0 };
+        pair_weight
+            .entry(key)
+            .and_modify(|x| *x = x.max(w))
+            .or_insert(w);
+    }
+    // Canonical pair list (s < t) + node degree — the basis for all insight math.
+    let canon: Vec<(usize, usize, f64)> =
+        pair_weight.iter().map(|(&(s, t), &w)| (s, t, w)).collect();
+    let mut adjacency: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nodes.len()];
+    let mut degree: Vec<usize> = vec![0; nodes.len()];
+    for &(s, t, w) in &canon {
         adjacency[s].push((t, w));
         adjacency[t].push((s, w));
+        degree[s] += 1;
+        degree[t] += 1;
     }
 
     let raw_comm = louvain(nodes.len(), &adjacency, 1.0);
-    let (communities, node_comm_by_index) = summarize_communities(nodes, edges, &index, &raw_comm);
+    let (communities, node_comm_by_index) =
+        summarize_communities(nodes, &canon, &degree, &raw_comm);
 
     let node_communities: BTreeMap<String, usize> = nodes
         .iter()
@@ -98,9 +122,9 @@ pub fn compute_insights(nodes: &[ApiGraphNode], edges: &[ApiGraphEdge]) -> Graph
         .collect();
 
     let surprising_connections =
-        find_surprising_connections(nodes, edges, &node_communities, 5);
+        find_surprising_connections(nodes, &canon, &degree, &node_communities, 5);
     let knowledge_gaps =
-        detect_knowledge_gaps(nodes, edges, &communities, &node_communities, 8);
+        detect_knowledge_gaps(nodes, &canon, &degree, &communities, &node_communities, 8);
 
     GraphInsights {
         communities,
@@ -271,21 +295,14 @@ fn renumber(labels: &mut [usize]) -> usize {
 
 fn summarize_communities(
     nodes: &[ApiGraphNode],
-    edges: &[ApiGraphEdge],
-    index: &BTreeMap<&str, usize>,
+    canon: &[(usize, usize, f64)],
+    degree: &[usize],
     raw_comm: &[usize],
 ) -> (Vec<CommunityInfo>, Vec<usize>) {
-    // Undirected edge presence set (unweighted), as the frontend cohesion uses.
-    let mut edge_set: BTreeSet<(usize, usize)> = BTreeSet::new();
-    for e in edges {
-        if let (Some(&s), Some(&t)) =
-            (index.get(e.source.as_str()), index.get(e.target.as_str()))
-        {
-            if s != t {
-                edge_set.insert(if s < t { (s, t) } else { (t, s) });
-            }
-        }
-    }
+    // Undirected edge presence set (unweighted) for cohesion. `canon` is
+    // already deduped with s < t, so this is a direct copy of its endpoints.
+    let edge_set: BTreeSet<(usize, usize)> =
+        canon.iter().map(|&(s, t, _)| (s, t)).collect();
 
     // Group node indices by raw community id.
     let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -311,7 +328,7 @@ fn summarize_communities(
             let cohesion = intra as f64 / possible as f64;
 
             let mut sorted = members.clone();
-            sorted.sort_by(|&a, &b| nodes[b].link_count.cmp(&nodes[a].link_count));
+            sorted.sort_by(|&a, &b| degree[b].cmp(&degree[a]));
             let top_nodes = sorted
                 .iter()
                 .take(5)
@@ -357,13 +374,12 @@ fn summarize_communities(
 
 fn find_surprising_connections(
     nodes: &[ApiGraphNode],
-    edges: &[ApiGraphEdge],
+    canon: &[(usize, usize, f64)],
+    degree: &[usize],
     node_communities: &BTreeMap<String, usize>,
     limit: usize,
 ) -> Vec<SurprisingConnection> {
-    let node_map: BTreeMap<&str, &ApiGraphNode> =
-        nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    let max_degree = nodes.iter().map(|n| n.link_count).max().unwrap_or(1).max(1);
+    let max_degree = degree.iter().copied().max().unwrap_or(1).max(1);
     let structural: BTreeSet<&str> = STRUCTURAL_IDS.iter().copied().collect();
 
     // Distant cross-type pairs worth an extra point.
@@ -379,13 +395,8 @@ fn find_surprising_connections(
     .collect();
 
     let mut scored: Vec<SurprisingConnection> = Vec::new();
-    for e in edges {
-        let (Some(&source), Some(&target)) = (
-            node_map.get(e.source.as_str()),
-            node_map.get(e.target.as_str()),
-        ) else {
-            continue;
-        };
+    for &(si, ti, weight) in canon {
+        let (source, target) = (&nodes[si], &nodes[ti]);
         if structural.contains(source.id.as_str()) || structural.contains(target.id.as_str()) {
             continue;
         }
@@ -417,15 +428,15 @@ fn find_surprising_connections(
         }
 
         // Signal 3: a peripheral node links to a hub (+2).
-        let min_deg = source.link_count.min(target.link_count);
-        let max_deg = source.link_count.max(target.link_count);
+        let min_deg = degree[si].min(degree[ti]);
+        let max_deg = degree[si].max(degree[ti]);
         if min_deg <= 2 && max_deg as f64 >= max_degree as f64 * 0.5 {
             score += 2;
             reasons.push("peripheral node links to hub".to_string());
         }
 
         // Signal 4: weak-but-present connection (+1).
-        if e.weight < 2.0 && e.weight > 0.0 {
+        if weight < 2.0 && weight > 0.0 {
             score += 1;
             reasons.push("weak but present connection".to_string());
         }
@@ -457,21 +468,23 @@ fn find_surprising_connections(
 
 fn detect_knowledge_gaps(
     nodes: &[ApiGraphNode],
-    edges: &[ApiGraphEdge],
+    canon: &[(usize, usize, f64)],
+    degree: &[usize],
     communities: &[CommunityInfo],
     node_communities: &BTreeMap<String, usize>,
     limit: usize,
 ) -> Vec<KnowledgeGap> {
     let mut gaps: Vec<KnowledgeGap> = Vec::new();
-    let node_map: BTreeMap<&str, &ApiGraphNode> =
-        nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
-    // 1. Isolated nodes (degree ≤ 1; exclude overview/index/log).
+    // 1. Isolated nodes (canonical degree ≤ 1, counting typed edges too — NOT
+    //    the wikilink-only `link_count`; exclude overview/index/log).
     let isolated: Vec<&ApiGraphNode> = nodes
         .iter()
-        .filter(|n| {
-            n.link_count <= 1 && n.node_type != "overview" && n.id != "index" && n.id != "log"
+        .enumerate()
+        .filter(|(i, n)| {
+            degree[*i] <= 1 && n.node_type != "overview" && n.id != "index" && n.id != "log"
         })
+        .map(|(_, n)| n)
         .collect();
     if !isolated.is_empty() {
         let top: Vec<&str> = isolated.iter().take(5).map(|n| n.label.as_str()).collect();
@@ -524,18 +537,17 @@ fn detect_knowledge_gaps(
     let structural: BTreeSet<&str> = STRUCTURAL_IDS.iter().copied().collect();
     let mut neighbor_comms: BTreeMap<&str, BTreeSet<usize>> =
         nodes.iter().map(|n| (n.id.as_str(), BTreeSet::new())).collect();
-    for e in edges {
-        let (Some(&s), Some(&t)) = (
-            node_map.get(e.source.as_str()),
-            node_map.get(e.target.as_str()),
-        ) else {
-            continue;
-        };
+    for &(si, ti, _) in canon {
+        let (s, t) = (&nodes[si], &nodes[ti]);
         if let Some(&tc) = node_communities.get(&t.id) {
-            neighbor_comms.get_mut(s.id.as_str()).map(|set| set.insert(tc));
+            if let Some(set) = neighbor_comms.get_mut(s.id.as_str()) {
+                set.insert(tc);
+            }
         }
         if let Some(&sc) = node_communities.get(&s.id) {
-            neighbor_comms.get_mut(t.id.as_str()).map(|set| set.insert(sc));
+            if let Some(set) = neighbor_comms.get_mut(t.id.as_str()) {
+                set.insert(sc);
+            }
         }
     }
 
@@ -589,6 +601,15 @@ mod tests {
             target: target.to_string(),
             weight: 1.0,
             relation: "link".to_string(),
+        }
+    }
+
+    fn typed_edge(source: &str, target: &str, relation: &str) -> ApiGraphEdge {
+        ApiGraphEdge {
+            source: source.to_string(),
+            target: target.to_string(),
+            weight: 1.0,
+            relation: relation.to_string(),
         }
     }
 
@@ -683,5 +704,69 @@ mod tests {
         assert!(insights.communities.is_empty());
         assert!(insights.knowledge_gaps.is_empty());
         assert!(insights.surprising_connections.is_empty());
+    }
+
+    #[test]
+    fn parallel_link_and_typed_edge_collapse_to_one_surprising_entry() {
+        // Same two-triangle bridge as the surprising test, but the c–d bridge
+        // carries BOTH a wikilink and a typed edge (a parallel pair). Before the
+        // multigraph collapse this scored c–d twice and could fill two slots.
+        let nodes = vec![
+            node("a", "concept", 2),
+            node("b", "concept", 2),
+            node("c", "concept", 3),
+            node("d", "entity", 3),
+            node("e", "entity", 2),
+            node("f", "entity", 2),
+        ];
+        let edges = vec![
+            edge("a", "b"),
+            edge("b", "c"),
+            edge("a", "c"),
+            edge("d", "e"),
+            edge("e", "f"),
+            edge("d", "f"),
+            edge("c", "d"),
+            typed_edge("c", "d", "prerequisite"), // parallel with the c–d link
+        ];
+        let insights = compute_insights(&nodes, &edges);
+        let cd = insights
+            .surprising_connections
+            .iter()
+            .filter(|s| s.key == "c:::d")
+            .count();
+        assert_eq!(cd, 1, "parallel link+typed c–d must collapse to one entry");
+    }
+
+    #[test]
+    fn typed_only_connections_count_toward_degree() {
+        // `hub` has NO wikilinks (link_count 0) but is referenced by typed edges
+        // from a, b, c. Counting typed edges it has degree 3 and must NOT be
+        // flagged isolated — the old wikilink-only `link_count` did the opposite.
+        let nodes = vec![
+            node("a", "concept", 2),
+            node("b", "concept", 2),
+            node("c", "concept", 2),
+            node("hub", "concept", 0),
+        ];
+        let edges = vec![
+            edge("a", "b"),
+            edge("b", "c"),
+            edge("a", "c"),
+            typed_edge("a", "hub", "prerequisite"),
+            typed_edge("b", "hub", "prerequisite"),
+            typed_edge("c", "hub", "prerequisite"),
+        ];
+        let insights = compute_insights(&nodes, &edges);
+        if let Some(g) = insights
+            .knowledge_gaps
+            .iter()
+            .find(|g| g.gap_type == "isolated-node")
+        {
+            assert!(
+                !g.node_ids.contains(&"hub".to_string()),
+                "typed-only-connected hub must not be flagged isolated"
+            );
+        }
     }
 }
