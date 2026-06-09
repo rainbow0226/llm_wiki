@@ -823,7 +823,7 @@ fn collect_doc(
     let candidate = DocCollect {
         path: relative_to_project(project_path, path),
         title,
-        snippet: build_snippet(content, &snippet_anchor),
+        snippet: build_snippet_from_lower(content, &content_lower, &snippet_anchor),
         images: extract_image_refs(content),
         content: include_content.then(|| content.to_string()),
         weighted_tf,
@@ -1241,7 +1241,13 @@ fn google_embedding_body(model: &str, text: &str, output_dimensionality: Option<
 }
 
 pub fn build_snippet(content: &str, query: &str) -> String {
-    let lower = content.to_lowercase();
+    build_snippet_from_lower(content, &content.to_lowercase(), query)
+}
+
+// Same as `build_snippet` but takes the already-lowercased body, so callers
+// that have it (every scored candidate in `collect_doc`) don't re-lowercase the
+// whole document a second time.
+fn build_snippet_from_lower(content: &str, lower: &str, query: &str) -> String {
     let q = query.to_lowercase();
     let idx = lower.find(&q).unwrap_or(0);
     let char_positions: Vec<usize> = content.char_indices().map(|(idx, _)| idx).collect();

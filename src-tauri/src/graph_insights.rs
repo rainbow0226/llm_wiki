@@ -111,7 +111,7 @@ pub fn compute_insights(nodes: &[ApiGraphNode], edges: &[ApiGraphEdge]) -> Graph
         degree[t] += 1;
     }
 
-    let raw_comm = louvain(nodes.len(), &adjacency, 1.0);
+    let raw_comm = louvain(nodes.len(), adjacency, 1.0);
     let (communities, node_comm_by_index) =
         summarize_communities(nodes, &canon, &degree, &raw_comm);
 
@@ -154,14 +154,16 @@ impl Level {
     }
 }
 
-fn louvain(num_nodes: usize, adjacency: &[Vec<(usize, f64)>], resolution: f64) -> Vec<usize> {
+fn louvain(num_nodes: usize, adjacency: Vec<Vec<(usize, f64)>>, resolution: f64) -> Vec<usize> {
     if num_nodes == 0 {
         return Vec::new();
     }
     // Final community per ORIGINAL node; updated as levels compose.
     let mut result: Vec<usize> = (0..num_nodes).collect();
+    // Take ownership of the level-0 adjacency (the caller no longer needs it),
+    // avoiding a full clone of the graph.
     let mut level = Level {
-        adj: adjacency.to_vec(),
+        adj: adjacency,
         self_loops: vec![0.0; num_nodes],
     };
 
@@ -299,10 +301,15 @@ fn summarize_communities(
     degree: &[usize],
     raw_comm: &[usize],
 ) -> (Vec<CommunityInfo>, Vec<usize>) {
-    // Undirected edge presence set (unweighted) for cohesion. `canon` is
-    // already deduped with s < t, so this is a direct copy of its endpoints.
-    let edge_set: BTreeSet<(usize, usize)> =
-        canon.iter().map(|&(s, t, _)| (s, t)).collect();
+    // Intra-community edge counts in ONE O(E) pass over the canonical pairs
+    // (s < t, deduped), instead of an O(n²) all-pairs edge probe per community —
+    // wiki graphs routinely collapse into one large cluster.
+    let mut intra_by_comm: BTreeMap<usize, usize> = BTreeMap::new();
+    for &(s, t, _) in canon {
+        if raw_comm[s] == raw_comm[t] {
+            *intra_by_comm.entry(raw_comm[s]).or_default() += 1;
+        }
+    }
 
     // Group node indices by raw community id.
     let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -314,16 +321,7 @@ fn summarize_communities(
         .into_iter()
         .map(|(raw_id, members)| {
             let n = members.len();
-            let mut intra = 0usize;
-            for a in 0..members.len() {
-                for b in (a + 1)..members.len() {
-                    let (i, j) = (members[a], members[b]);
-                    let key = if i < j { (i, j) } else { (j, i) };
-                    if edge_set.contains(&key) {
-                        intra += 1;
-                    }
-                }
-            }
+            let intra = *intra_by_comm.get(&raw_id).unwrap_or(&0);
             let possible = if n > 1 { (n * (n - 1)) / 2 } else { 1 };
             let cohesion = intra as f64 / possible as f64;
 
