@@ -326,15 +326,20 @@ pub async fn search_project_inner(
         .into_iter()
         .map(|c| {
             let bm25 = bm25_score(&c.weighted_tf, c.doc_len, avg_doc_len, &idf);
+            // DEVWIKI (P4③): bias ONLY the BM25 bag-of-words relevance by page
+            // type for the active SDLC phase (1.0 when no phase ⇒ identical to
+            // the un-phased ranking). The exact-match signals below stay
+            // phase-invariant and additive — otherwise a <1.0 page-type weight
+            // would scale down an exact filename hit (200) and could demote it
+            // below a fuzzy match on a >1.0 type, breaking the exact-match
+            // guarantee the un-phased path preserves.
+            let weighted_bm25 = bm25
+                * crate::commands::search_weights::type_weight(phase.as_deref(), &c.node_type);
             // Exact-match signals BM25's bag of words misses stay additive.
-            let base = bm25
+            let score = weighted_bm25
                 + if c.filename_exact { FILENAME_EXACT_BONUS } else { 0.0 }
                 + if c.title_has_phrase { PHRASE_IN_TITLE_BONUS } else { 0.0 }
                 + c.content_phrase_occ as f64 * PHRASE_IN_CONTENT_PER_OCC;
-            // DEVWIKI (P4③): bias the score by page type for the active SDLC
-            // phase (1.0 when no phase ⇒ identical to the un-phased ranking).
-            let score = base
-                * crate::commands::search_weights::type_weight(phase.as_deref(), &c.node_type);
             ProjectSearchResult {
                 path: c.path,
                 title: c.title,
@@ -1874,6 +1879,47 @@ mod tests {
         let dev = run(Some("dev")).await;
         assert!(dev.results[0].path.ends_with("deploy-runbook.md"));
         assert!(dev.results[0].score > dev.results[1].score);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn phase_weight_does_not_scale_exact_filename_bonus() {
+        let root = tmp_project();
+        // A page that matches by exact filename only — body carries none of the
+        // query terms. The query folds into both the filename-exact bonus (200)
+        // and, since the filename is part of the title-match text, the
+        // title-phrase bonus (50). Under phase=ops a `concept` is weighted 0.9;
+        // those absolute bonuses must stay OUTSIDE the multiply (score ≥ 250),
+        // not be scaled in (old code ⇒ ≤ 0.9×250 ≈ 225), or an exact hit could
+        // be demoted below a fuzzy match on a >1.0 page type (DW-17).
+        write_page(
+            &root,
+            "wiki/concepts/deploy.md",
+            "---\ntype: concept\ntitle: Cluster Notes\n---\n\nkubernetes orchestration overview.",
+        );
+        let res = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "deploy".into(),
+            20,
+            false,
+            None,
+            None,
+            false,
+            Some("ops".into()),
+        )
+        .await
+        .unwrap();
+        let hit = res
+            .results
+            .iter()
+            .find(|r| r.path.ends_with("deploy.md"))
+            .expect("exact-filename page should be a hit");
+        let abs_bonus = FILENAME_EXACT_BONUS + PHRASE_IN_TITLE_BONUS;
+        assert!(
+            hit.score >= abs_bonus - 1e-9,
+            "exact-match bonuses must be phase-invariant (expected ≥ {abs_bonus}, got {})",
+            hit.score
+        );
         let _ = fs::remove_dir_all(root);
     }
 }
