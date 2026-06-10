@@ -26,6 +26,16 @@ describe("inferWikiTypeFromPath", () => {
     expect(inferWikiTypeFromPath("/project/wiki/people/ada-lovelace.md")).toBe("people")
     expect(inferWikiTypeFromPath("/project/wiki/technologies/vector-db.md")).toBe("technologies")
   })
+
+  // DEVWIKI: enterprise dirs map to singular types; _meta maps to "meta"
+  // so its pages pick up the registry style instead of the raw dir name.
+  it("maps enterprise directories to their singular types", () => {
+    expect(inferWikiTypeFromPath("/project/wiki/playbooks/deploy.md")).toBe("playbook")
+    expect(inferWikiTypeFromPath("/project/wiki/decisions/pow-vs-pos.md")).toBe("decision")
+    expect(inferWikiTypeFromPath("/project/wiki/solutions/key-custody.md")).toBe("solution")
+    expect(inferWikiTypeFromPath("/project/wiki/learnings/session-1.md")).toBe("learning")
+    expect(inferWikiTypeFromPath("/project/wiki/_meta/README.md")).toBe("meta")
+  })
 })
 
 describe("wikiTypeLabel", () => {

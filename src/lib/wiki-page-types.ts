@@ -27,6 +27,10 @@ const WIKI_TYPE_DIRS: Array<{ dir: string; type: string }> = [
   { dir: "playbooks", type: "playbook" },
   { dir: "decisions", type: "decision" },
   { dir: "learnings", type: "learning" },
+  // _meta/ pages (bc-readme overviews, registry README) → "meta", which the
+  // style registry maps to the Boxes icon; the raw dir name "_meta" matched
+  // the custom-dir fallback before and styled as a plain document.
+  { dir: "_meta", type: "meta" },
 ]
 
 export function inferWikiTypeFromPath(path: string, fileName?: string): string | null {
