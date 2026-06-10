@@ -4,7 +4,7 @@ import { SigmaContainer, useLoadGraph, useRegisterEvents, useSetSettings, useSig
 import "@react-sigma/core/lib/style.css"
 import type { SigmaNodeEventPayload } from "sigma/types"
 import forceAtlas2 from "graphology-layout-forceatlas2"
-import { Network, RefreshCw, ZoomIn, ZoomOut, Maximize, Layers, Tag, Lightbulb, AlertTriangle, Link2, X, Search, Loader2, Filter, RotateCcw, EyeOff } from "lucide-react"
+import { Network, RefreshCw, ZoomIn, ZoomOut, Maximize, Layers, Tag, Lightbulb, AlertTriangle, Link2, X, Search, Loader2, Filter, RotateCcw, EyeOff, Rotate3d } from "lucide-react"
 import { ErrorBoundary } from "@/components/error-boundary"
 import { useResearchStore } from "@/stores/research-store"
 import { Button } from "@/components/ui/button"
@@ -19,48 +19,12 @@ import { applyGraphFilters, DEFAULT_GRAPH_FILTERS, hasActiveGraphFilters, type G
 import { applyGraphSearch } from "@/lib/graph-search"
 import { wikiTypeLabel } from "@/lib/wiki-page-types"
 import { useTranslation } from "react-i18next"
+// DEVWIKI: shared palettes (2D/3D) + lazy 3D renderer (three.js loads on demand).
+import { NODE_TYPE_COLORS, COMMUNITY_COLORS, nodeColor, hexToRgba, mixColor, type ColorMode } from "./graph-colors"
+import { lazy, Suspense } from "react"
 
-const NODE_TYPE_COLORS: Record<string, string> = {
-  entity: "#60a5fa",    // blue-400
-  concept: "#c084fc",   // purple-400
-  source: "#fb923c",    // orange-400
-  query: "#4ade80",     // green-400
-  synthesis: "#f87171", // red-400
-  overview: "#facc15",  // yellow-400
-  comparison: "#2dd4bf", // teal-400
-  finding: "#a855f7",    // purple-500
-  thesis: "#f43f5e",     // rose-500
-  methodology: "#14b8a6", // teal-500
-  other: "#94a3b8",     // slate-400
-}
+const GraphView3D = lazy(() => import("./graph-view-3d"))
 
-const CUSTOM_NODE_COLORS = [
-  "#38bdf8",
-  "#34d399",
-  "#fbbf24",
-  "#fb7185",
-  "#a78bfa",
-  "#22d3ee",
-  "#f97316",
-  "#84cc16",
-]
-
-const COMMUNITY_COLORS = [
-  "#60a5fa",  // blue-400
-  "#4ade80",  // green-400
-  "#fb923c",  // orange-400
-  "#c084fc",  // purple-400
-  "#f87171",  // red-400
-  "#2dd4bf",  // teal-400
-  "#facc15",  // yellow-400
-  "#f472b6",  // pink-400
-  "#a78bfa",  // violet-400
-  "#38bdf8",  // sky-400
-  "#34d399",  // emerald-400
-  "#fbbf24",  // amber-400
-]
-
-type ColorMode = "type" | "community"
 type GraphThemePalette = {
   defaultEdge: string
   label: string
@@ -109,30 +73,6 @@ function useResolvedDarkMode(): boolean {
   }, [])
 
   return isDark
-}
-
-function nodeColor(type: string): string {
-  if (NODE_TYPE_COLORS[type]) return NODE_TYPE_COLORS[type]
-  let hash = 0
-  for (const char of type) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
-  return CUSTOM_NODE_COLORS[hash % CUSTOM_NODE_COLORS.length] ?? NODE_TYPE_COLORS.other
-}
-
-function hexToRgba(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b = parseInt(hex.slice(5, 7), 16)
-  return `rgba(${r},${g},${b},${alpha})`
-}
-
-function mixColor(color1: string, color2: string, ratio: number): string {
-  const hex = (c: string) => parseInt(c, 16)
-  const r1 = hex(color1.slice(1, 3)), g1 = hex(color1.slice(3, 5)), b1 = hex(color1.slice(5, 7))
-  const r2 = hex(color2.slice(1, 3)), g2 = hex(color2.slice(3, 5)), b2 = hex(color2.slice(5, 7))
-  const r = Math.round(r1 + (r2 - r1) * ratio)
-  const g = Math.round(g1 + (g2 - g1) * ratio)
-  const b = Math.round(b1 + (b2 - b1) * ratio)
-  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`
 }
 
 function graphDensityScale(nodeCount: number): number {
@@ -266,9 +206,17 @@ function GraphLoader({
         if (!graph.hasEdge(edgeKey) && !graph.hasEdge(`${edge.target}->${edge.source}`)) {
           const normalizedWeight = edge.weight / maxWeight // 0..1
           const size = 0.5 + normalizedWeight * 3.5 // 0.5..4
-          // Stronger relationships → darker color
-          const alpha = Math.round(40 + normalizedWeight * 180) // 40..220
-          const color = `rgba(100,116,139,${alpha / 255})` // slate-500 with variable opacity
+          // DEVWIKI: edges blend their endpoint node colors instead of a
+          // flat slate — clusters pick up their community/type hue and the
+          // graph reads as connected tissue rather than grey wires.
+          // Stronger relationships → more opaque.
+          const alpha = (40 + normalizedWeight * 180) / 255 // ~0.16..0.86
+          const blend = mixColor(
+            (graph.getNodeAttribute(edge.source, "color") as string) ?? "#64748b",
+            (graph.getNodeAttribute(edge.target, "color") as string) ?? "#64748b",
+            0.5,
+          )
+          const color = hexToRgba(blend, alpha)
           graph.addEdgeWithKey(edgeKey, edge.source, edge.target, {
             color,
             size,
@@ -552,6 +500,8 @@ export function GraphView() {
   const [error, setError] = useState<string | null>(null)
   const [hoveredType, setHoveredType] = useState<string | null>(null)
   const [colorMode, setColorMode] = useState<ColorMode>("type")
+  // DEVWIKI: 2D (sigma) vs 3D (three.js) renderer toggle.
+  const [viewMode, setViewMode] = useState<"2d" | "3d">("2d")
   const [showInsights, setShowInsights] = useState(false)
   const [highlightedNodes, setHighlightedNodes] = useState<Set<string>>(new Set())
   const [hoverState, setHoverState] = useState<HoverState>(null)
@@ -959,6 +909,16 @@ export function GraphView() {
             <Layers className="h-3 w-3" />
             {t("graph.community")}
           </Button>
+          {/* DEVWIKI: 2D/3D renderer toggle */}
+          <Button
+            variant={viewMode === "3d" ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => setViewMode((v) => (v === "3d" ? "2d" : "3d"))}
+            className="text-xs gap-1 h-7"
+          >
+            <Rotate3d className="h-3 w-3" />
+            3D
+          </Button>
           {(surprisingConns.filter((c) => !dismissedInsights.has(c.key)).length > 0 || visibleKnowledgeGaps.length > 0) && (
             <Button
               variant={showInsights ? "secondary" : "ghost"}
@@ -999,6 +959,31 @@ export function GraphView() {
             </div>
           ) : (
             <>
+              {viewMode === "3d" ? (
+                // DEVWIKI: 3D renderer (three.js); lazy so the heavy bundle
+                // is only fetched on first switch.
+                <ErrorBoundary>
+                  <Suspense
+                    fallback={
+                      <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        3D…
+                      </div>
+                    }
+                  >
+                    <GraphView3D
+                      nodes={searchedGraph.nodes}
+                      edges={searchedGraph.edges}
+                      colorMode={colorMode}
+                      nodeScale={nodeScale}
+                      highlightedNodes={searchActive ? searchedGraph.matchedNodeIds : highlightedNodes}
+                      isDark={isDarkMode}
+                      onNodeClick={handleNodeClick}
+                      onNodeRightClick={handleNodeContextMenu}
+                    />
+                  </Suspense>
+                </ErrorBoundary>
+              ) : (
               <ErrorBoundary>
                 <SigmaContainer
                   key={sigmaKey}
@@ -1037,6 +1022,7 @@ export function GraphView() {
                   <ZoomControls />
                 </SigmaContainer>
               </ErrorBoundary>
+              )}
 
               {searchedGraph.nodes.length === 0 && (
                 <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-slate-50/85 text-muted-foreground backdrop-blur-[1px] dark:bg-slate-950/85">
