@@ -52,3 +52,6 @@ pnpm-debug.log*
 
 # codegraph index (local code-intelligence cache)
 .codegraph/
+
+# DEVWIKI: app icon 生成中间产物（scripts/generate-app-icon.py 输出）
+/build/
