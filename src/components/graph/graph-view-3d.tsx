@@ -4,8 +4,8 @@
 // through graph-colors.ts.
 //
 // Aesthetic choices:
-//   - deep-space background to match the dev_wiki galaxy branding; bloom
-//     post-processing makes node spheres glow like stars
+//   - deep-space background to match the dev_wiki galaxy branding; solid
+//     lit spheres (no bloom — glow made nodes hard to tell apart)
 //   - links blend their endpoint colors and stay translucent so dense
 //     clusters read as nebulae instead of hairballs
 //   - hovering a node lights its neighborhood and runs directional
@@ -18,7 +18,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ForceGraph3D, { type ForceGraphMethods, type NodeObject, type LinkObject } from "react-force-graph-3d"
 import * as THREE from "three"
-import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js"
 import SpriteText from "three-spritetext"
 import type { GraphNode, GraphEdge } from "@/lib/wiki-graph"
 import { nodeColor, communityColor, mixColor, hexToRgba, type ColorMode } from "./graph-colors"
@@ -125,25 +124,6 @@ export default function GraphView3D({
     [colorMode],
   )
 
-  // Bloom pass: makes emissive node spheres glow. Softer in light mode
-  // where a strong bloom washes the scene out.
-  useEffect(() => {
-    const fg = fgRef.current
-    if (!fg || !size.width) return
-    const composer = fg.postProcessingComposer()
-    const bloom = new UnrealBloomPass(
-      new THREE.Vector2(size.width, size.height),
-      isDark ? 1.1 : 0.45, // strength
-      0.65, // radius
-      isDark ? 0.08 : 0.35, // luminance threshold
-    )
-    composer.addPass(bloom)
-    return () => {
-      composer.removePass(bloom)
-      bloom.dispose()
-    }
-  }, [isDark, size.width, size.height])
-
   // Gentle auto-rotate until the user grabs the scene.
   useEffect(() => {
     const fg = fgRef.current
@@ -173,14 +153,18 @@ export default function GraphView3D({
 
       const r = (3 + Math.sqrt(node.linkCount + 1) * 1.6) * nodeScale
       const group = new THREE.Group()
+      // Solid lit sphere: low emissive keeps the color readable on the dark
+      // side without bloom-style glow; phong highlight sells the 3D shape.
       const sphere = new THREE.Mesh(
         new THREE.SphereGeometry(r, 24, 24),
-        new THREE.MeshLambertMaterial({
+        new THREE.MeshPhongMaterial({
           color,
           transparent: true,
-          opacity: dimmed ? 0.18 : 0.95,
+          opacity: dimmed ? 0.15 : 1,
           emissive: new THREE.Color(color),
-          emissiveIntensity: dimmed ? 0.08 : highlighted || inHover ? 0.95 : 0.45,
+          emissiveIntensity: dimmed ? 0.05 : highlighted || inHover ? 0.6 : 0.3,
+          specular: new THREE.Color("#ffffff"),
+          shininess: 36,
         }),
       )
       group.add(sphere)
@@ -208,7 +192,8 @@ export default function GraphView3D({
       const blend = s && t ? mixColor(baseColor(s), baseColor(t), 0.5) : "#64748b"
       const active = hoverNeighborhood?.links.has(link) ?? false
       if (hoverNeighborhood && !active) return hexToRgba(blend, 0.06)
-      const alpha = active ? 0.85 : Math.min(0.16 + link.weight * 0.05, 0.38)
+      // No bloom haze anymore — links carry a bit more opacity themselves.
+      const alpha = active ? 0.9 : Math.min(0.22 + link.weight * 0.06, 0.5)
       return hexToRgba(blend, alpha)
     },
     [data.nodes, baseColor, hoverNeighborhood],
@@ -216,7 +201,10 @@ export default function GraphView3D({
 
   return (
     <div ref={containerRef} className="absolute inset-0">
-      {size.width > 0 && (
+      {/* Both dimensions must be real: a 0-height renderer leaves WebGL
+          with zero-size framebuffer attachments and a permanently black
+          canvas. */}
+      {size.width > 0 && size.height > 0 && (
         <ForceGraph3D<Node3D, Link3D>
           ref={fgRef}
           width={size.width}
