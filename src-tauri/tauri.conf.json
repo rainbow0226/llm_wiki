@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "dev_wiki",
-  "version": "0.4.22",
+  "version": "0.0.1",
   "identifier": "com.llmwiki.app",
   "build": {
     "beforeDevCommand": "npm run dev",

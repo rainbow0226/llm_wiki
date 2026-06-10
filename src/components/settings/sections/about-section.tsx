@@ -55,7 +55,7 @@ export function AboutSection() {
     useUpdateStore.getState().setChecking(true)
     const result = await checkForUpdates({
       currentVersion: __APP_VERSION__,
-      repo: "nashsu/llm_wiki",
+      repo: "rainbow0226/llm_wiki", // DEVWIKI: dev_wiki releases live on the fork
     })
     const now = Date.now()
     useUpdateStore.getState().setResult(result, now)
@@ -205,7 +205,7 @@ export function AboutSection() {
       </div>
 
       <div className="rounded-md border p-4 text-sm">
-        <div className="font-medium">LLM Wiki</div>
+        <div className="font-medium">dev_wiki</div>
         <p className="mt-1 text-xs text-muted-foreground">
           {t("settings.sections.about.appDescription")}
           {" "}
@@ -219,15 +219,15 @@ export function AboutSection() {
            */}
           <a
             className="cursor-pointer underline underline-offset-2 hover:text-primary"
-            href="https://github.com/nashsu/llm_wiki"
+            href="https://github.com/rainbow0226/llm_wiki"
             onClick={(e) => {
               e.preventDefault()
-              void openUrl("https://github.com/nashsu/llm_wiki").catch((err) => {
+              void openUrl("https://github.com/rainbow0226/llm_wiki").catch((err) => {
                 console.error("[about] openUrl failed:", err)
               })
             }}
           >
-            github.com/nashsu/llm_wiki
+            github.com/rainbow0226/llm_wiki
           </a>
         </p>
       </div>

@@ -587,7 +587,7 @@
         "openDownload": "Open download page",
         "later": "Later",
         "autoCheck": "Check for updates automatically on startup (at most once every 6 hours)",
-        "appDescription": "An LLM-driven personal knowledge base. Source:"
+        "appDescription": "A knowledge base for the full software development lifecycle (forked from nashsu/llm_wiki). Source:"
       },
       "mineru": {
         "title": "MinerU PDF Parser",
