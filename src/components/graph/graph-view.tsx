@@ -20,7 +20,7 @@ import { applyGraphSearch } from "@/lib/graph-search"
 import { wikiTypeLabel } from "@/lib/wiki-page-types"
 import { useTranslation } from "react-i18next"
 // DEVWIKI: shared palettes (2D/3D) + lazy 3D renderer (three.js loads on demand).
-import { NODE_TYPE_COLORS, COMMUNITY_COLORS, nodeColor, hexToRgba, mixColor, type ColorMode } from "./graph-colors"
+import { COMMUNITY_COLORS, nodeColor, hexToRgba, mixColor, type ColorMode } from "./graph-colors"
 import { lazy, Suspense } from "react"
 
 const GraphView3D = lazy(() => import("./graph-view-3d"))
