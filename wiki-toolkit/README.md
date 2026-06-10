@@ -28,16 +28,46 @@ wiki-toolkit/
 > 命名约定：知识库 skill 全部统一 `wiki-*` 前缀 —— 写入 `wiki-add`/`wiki-distill`，检索 `wiki-find`/`wiki-find-deep`，
 > 巡检 `wiki-lint`（原 `kb-lint`，已改名；旧名仍保留为触发别名）。
 
+## 接入 Claude Code（MCP server）
+
+dev_wiki 的 MCP server 暴露 `llm_wiki_*` 工具（`status`/`projects`/`files`/`read_file`/`search`/`graph`/`rescan_sources`/`graph_traverse`）。
+先 build，再用官方 CLI 注册到**用户级**配置（`~/.claude.json`），任何项目里都能用：
+
+```
+npm --prefix mcp-server run build          # 产物 mcp-server/dist/src/index.js
+claude mcp add llm_wiki -s user \
+  -e LLM_WIKI_API_BASE_URL=http://127.0.0.1:19828 \
+  -- node <repo>/mcp-server/dist/src/index.js
+claude mcp list                            # 应显示  llm_wiki  ✔ Connected
+```
+
+- env 只需 `LLM_WIKI_API_BASE_URL`（默认 `http://127.0.0.1:19828`）；启用鉴权再加 `-e LLM_WIKI_API_TOKEN=…`。
+- **无需 `NO_PROXY`**：MCP server 是 Node（全局 `fetch`/undici **不读** `HTTP_PROXY`），不像 Python MCP 那样会把 localhost 请求送进代理。
+- 改了服务端口/路径：`claude mcp remove llm_wiki -s user` 后重新 `add`，或直接编辑 `~/.claude.json`。
+
+## 运行态前置（MCP 工具与 `wiki-*` skills 都依赖）
+
+两者都通过 HTTP API 打到**运行中的 dev_wiki.app**（`:19828`）。实测前必须：
+
+1. 启动 dev_wiki.app → 打开目标项目 → Settings → **开启 API Server**（allowUnauthenticated，或配 token 并把同一 token 设进 `LLM_WIKI_API_TOKEN`）。
+2. 配 **embedding model/key**，向量召回才工作；否则只有关键词（BM25）半环，hybrid 的向量半环静默缺席。
+
+> app 未运行时：MCP 仍会 `✔ Connected`（那只是 stdio 层握手），但工具调用与 skill 的 curl 会连不上 API（连接拒绝 / 502）。
+
 ## 安装 skills
 
 `.claude/` 是本地配置、被 git 忽略，故 skill 的权威副本放在 `wiki-toolkit/skills/`。
-消费端按需安装到工作目录的 `.claude/skills/`：
+按需安装，两种作用域二选一：
 
 ```
+# 用户级（推荐用于实测）：装一次，任何项目里都能 /wiki-find 等
+cp -r wiki-toolkit/skills/{wiki-lint,wiki-add,wiki-distill,wiki-find,wiki-find-deep} ~/.claude/skills/
+
+# 或项目级：仅在该工作目录可见
 cp -r wiki-toolkit/skills/{wiki-lint,wiki-add,wiki-distill,wiki-find,wiki-find-deep} <work-dir>/.claude/skills/
 ```
 
-四个 `wiki-*` skill 走 HTTP API（写入 `POST /sources`，检索 `POST /search` + `GET /graph`），
+其中四个走 HTTP API（写入 `POST /sources`，检索 `POST /search` + `GET /graph`；`wiki-lint` 是只读 schema 巡检，读 vault 文件不打 API），
 鉴权用环境变量 `LLM_WIKI_API_TOKEN`（或 Settings → API Server 里允许无 token / 配 token）；
 若配了 llm_wiki MCP server，检索可改用 `llm_wiki_search`/`llm_wiki_graph`/`llm_wiki_read_file`，数据等价。
 curl 鉴权统一用 `AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: Bearer $TOKEN")` 模式（bash/zsh 均稳）。
