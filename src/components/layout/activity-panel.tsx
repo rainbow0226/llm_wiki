@@ -24,6 +24,8 @@ import {
   type FileChangeTask,
 } from "@/commands/file-sync"
 import { inferWikiTypeFromPath, wikiTypeLabel } from "@/lib/wiki-page-types"
+// DEVWIKI: shared type→icon registry covers enterprise types in activity rows.
+import { getWikiTypeStyle, FALLBACK_TYPE_STYLE } from "@/lib/wiki-type-style"
 
 const FILE_TYPE_ICONS: Record<string, typeof FileText> = {
   sources: BookOpen,
@@ -55,7 +57,11 @@ function getFileTypeInfo(path: string): { icon: typeof FileText; type: string } 
   const inferred = inferWikiTypeFromPath(path)
   if (inferred) {
     const directoryIcon = FILE_TYPE_ICONS[WIKI_TYPE_ICON_KEYS[inferred]]
-    return { icon: directoryIcon ?? FileText, type: wikiTypeLabel(inferred) }
+    // DEVWIKI: enterprise types aren't in the upstream icon map — pull their
+    // icon from the shared registry before defaulting to FileText.
+    const registryStyle = getWikiTypeStyle(inferred)
+    const registryIcon = registryStyle === FALLBACK_TYPE_STYLE ? undefined : registryStyle.icon
+    return { icon: directoryIcon ?? registryIcon ?? FileText, type: wikiTypeLabel(inferred) }
   }
   for (const [dir, icon] of Object.entries(FILE_TYPE_ICONS)) {
     if (path.includes(`/${dir}/`) || path.startsWith(`wiki/${dir}/`)) {

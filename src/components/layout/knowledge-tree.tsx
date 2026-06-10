@@ -10,6 +10,8 @@ import type { FileNode } from "@/types/wiki"
 import { normalizePath } from "@/lib/path-utils"
 import { cascadeDeleteWikiPagesWithRefs } from "@/lib/wiki-page-delete"
 import { inferWikiTypeFromPath, wikiTypeLabel } from "@/lib/wiki-page-types"
+// DEVWIKI: shared type→icon styles so enterprise types don't fall back to FileText.
+import { getWikiTypeStyle, FALLBACK_TYPE_STYLE } from "@/lib/wiki-type-style"
 
 interface WikiPageInfo {
   path: string
@@ -32,8 +34,22 @@ const TYPE_CONFIG: Record<string, { icon: typeof FileText; label: string; color:
   query:       { icon: HelpCircle,  label: "Queries",      color: "text-green-500",  order: 9 },
 }
 
+// DEVWIKI: enterprise types group after the native ones in a stable order
+// (instead of all landing on 99/alphabetical).
+const EXTRA_TYPE_ORDER: Record<string, number> = {
+  solution: 10, playbook: 11, decision: 12, learning: 13, "bc-readme": 14, meta: 14,
+}
+
 function typeConfig(type: string): { icon: typeof FileText; label: string; color: string; order: number } {
-  return TYPE_CONFIG[type] ?? { icon: FileText, label: wikiTypeLabel(type), color: "text-muted-foreground", order: 99 }
+  if (TYPE_CONFIG[type]) return TYPE_CONFIG[type]
+  // DEVWIKI: unknown to the upstream map → use the shared style registry
+  // (enterprise types get their real icon/colour; custom dirs keep a
+  // readable label and the generic fallback icon).
+  const style = getWikiTypeStyle(type)
+  if (style !== FALLBACK_TYPE_STYLE) {
+    return { icon: style.icon, label: style.label, color: style.textClass, order: EXTRA_TYPE_ORDER[type] ?? 90 }
+  }
+  return { icon: FileText, label: wikiTypeLabel(type), color: "text-muted-foreground", order: 99 }
 }
 
 export function KnowledgeTree() {

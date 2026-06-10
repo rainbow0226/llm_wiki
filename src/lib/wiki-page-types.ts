@@ -20,6 +20,13 @@ const WIKI_TYPE_DIRS: Array<{ dir: string; type: string }> = [
   { dir: "findings", type: "finding" },
   { dir: "thesis", type: "thesis" },
   { dir: "methodology", type: "methodology" },
+  // DEVWIKI: enterprise page types (P0) — singular type from plural dir,
+  // so path inference matches the frontmatter `type:` instead of falling
+  // through to the raw directory name.
+  { dir: "solutions", type: "solution" },
+  { dir: "playbooks", type: "playbook" },
+  { dir: "decisions", type: "decision" },
+  { dir: "learnings", type: "learning" },
 ]
 
 export function inferWikiTypeFromPath(path: string, fileName?: string): string | null {

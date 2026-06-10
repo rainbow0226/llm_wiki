@@ -8,6 +8,9 @@ import { normalizePath } from "@/lib/path-utils"
 import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
 import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/raw-source-resolver"
 import { isImeComposing } from "@/lib/keyboard-utils"
+// DEVWIKI: per-type icons on result cards instead of the generic FileText.
+import { inferWikiTypeFromPath } from "@/lib/wiki-page-types"
+import { getWikiTypeStyle } from "@/lib/wiki-type-style"
 
 /**
  * One image hit displayed in the Images section.
@@ -511,6 +514,9 @@ function SearchResultCard({
   onClick: () => void
 }) {
   const shortPath = result.path.split("/wiki/").pop() ?? result.path
+  // DEVWIKI: derive the page type from the path and show its real icon.
+  const typeStyle = getWikiTypeStyle(inferWikiTypeFromPath(result.path))
+  const TypeIcon = typeStyle.icon
 
   return (
     <button
@@ -519,7 +525,7 @@ function SearchResultCard({
       className="w-full rounded-lg border p-3 text-left text-sm hover:bg-accent transition-colors"
     >
       <div className="flex items-start gap-2 mb-1.5">
-        <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        <TypeIcon className={`mt-0.5 h-4 w-4 shrink-0 ${typeStyle.textClass}`} />
         <div className="flex-1 min-w-0">
           <div className="font-medium truncate">
             <HighlightedText text={result.title} query={query} />

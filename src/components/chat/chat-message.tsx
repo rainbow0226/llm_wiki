@@ -18,6 +18,8 @@ import type { FileNode } from "@/types/wiki"
 
 import { convertLatexToUnicode } from "@/lib/latex-to-unicode"
 import { normalizePath, getFileName } from "@/lib/path-utils"
+// DEVWIKI: shared type→icon registry for enterprise page types.
+import { getWikiTypeStyle, FALLBACK_TYPE_STYLE } from "@/lib/wiki-type-style"
 import { makeQueryFileName } from "@/lib/wiki-filename"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { messageImageToDataUrl } from "@/lib/chat-image-utils"
@@ -307,6 +309,15 @@ const REF_TYPE_CONFIG: Record<string, { icon: typeof FileText; color: string }> 
   anytxt: { icon: FileSearch, color: "text-emerald-500" },
 }
 
+// DEVWIKI: bridge to the shared type→style registry (wiki-type-style.ts) so
+// enterprise page types (solution/playbook/decision/learning/bc-readme) show
+// their own icon in citation lists instead of the generic source icon.
+function refTypeStyleFromRegistry(refType: string): { icon: typeof FileText; color: string } | null {
+  const style = getWikiTypeStyle(refType)
+  if (style === FALLBACK_TYPE_STYLE) return null
+  return { icon: style.icon, color: style.textClass }
+}
+
 function getRefType(path: string, page?: CitedPage): string {
   if (page?.kind === "external") {
     return page.source?.toLowerCase() === "anytxt" ? "anytxt" : "external"
@@ -496,7 +507,11 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
       <div className="px-2 pb-1.5">
         {visiblePages.map((page, i) => {
           const refType = getRefType(page.path, page)
-          const config = REF_TYPE_CONFIG[refType] ?? REF_TYPE_CONFIG.source
+          // DEVWIKI: enterprise/custom types fall back to the shared style
+          // registry before defaulting to the generic source icon.
+          const config = REF_TYPE_CONFIG[refType]
+            ?? refTypeStyleFromRegistry(refType)
+            ?? REF_TYPE_CONFIG.source
           const Icon = config.icon
           const info = imageInfos[page.path]
           const hasImages = (info?.count ?? 0) > 0
